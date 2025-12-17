@@ -1,0 +1,11 @@
+{
+  "domain": "mpc_heat_pump",
+  "name": "MPC Heat Pump Controller",
+  "version": "0.1.0",
+  "documentation": "https://www.home-assistant.io/",
+  "requirements": [],
+  "dependencies": [],
+  "integration_type": "service",
+  "config_flow": true,
+  "iot_class": "calculated"
+}
