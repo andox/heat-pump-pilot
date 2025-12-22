@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import timedelta
 import logging
 import inspect
@@ -38,8 +39,14 @@ from .const import (
     CONF_INITIAL_HEAT_GAIN,
     CONF_INITIAL_HEAT_LOSS_OVERRIDE,
     CONF_INITIAL_INDOOR_TEMP,
+    CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
+    CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN,
+    CONF_LEARNING_MODEL,
     CONF_MONITOR_ONLY,
     CONF_OUTDOOR_TEMP,
+    CONF_OVERSHOOT_WARM_BIAS_ENABLED,
+    CONF_OVERSHOOT_WARM_BIAS_FULL,
+    CONF_OVERSHOOT_WARM_BIAS_MARGIN,
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
@@ -48,6 +55,8 @@ from .const import (
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
     CONF_WEATHER_FORECAST_ENTITY,
     CONF_HEAT_LOSS_COEFFICIENT,
+    CONF_PERFORMANCE_WINDOW_HOURS,
+    CONF_RLS_FORGETTING_FACTOR,
     DEFAULT_MONITOR_ONLY,
     DEFAULT_COMFORT_TEMPERATURE_TOLERANCE,
     DEFAULT_CONTROL_INTERVAL_MINUTES,
@@ -55,13 +64,24 @@ from .const import (
     DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS,
     DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
     DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD,
+    DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
+    DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN,
+    DEFAULT_LEARNING_MODEL,
+    DEFAULT_PERFORMANCE_WINDOW_HOURS,
     DEFAULT_PREDICTION_HORIZON_HOURS,
+    DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
+    DEFAULT_OVERSHOOT_WARM_BIAS_FULL,
+    DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN,
     DEFAULT_PRICE_COMFORT_WEIGHT,
+    DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
     DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
     DEFAULT_HEAT_LOSS_COEFFICIENT,
     DOMAIN,
+    LEARNING_MODEL_EKF,
+    LEARNING_MODEL_RLS,
+    PERFORMANCE_WINDOW_OPTIONS,
     SIGNAL_DECISION_UPDATED,
     SIGNAL_OPTIONS_UPDATED,
 )
@@ -69,8 +89,10 @@ from .forecast_utils import align_forecast_to_now, expand_to_steps, extract_time
 from .learning_utils import should_reseed_thermal_model
 from .mpc_controller import MpcController, ControlResult
 from .notification_utils import NotificationTracker, NotificationUpdate
+from .performance_utils import PerformanceSample, compute_comfort_score, compute_prediction_accuracy, compute_price_score
+from .performance_history import PerformanceHistoryStorage
 from .price_history import PriceHistoryStorage
-from .thermal_model import ThermalModelEstimator, ThermalModelStorage
+from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator, ThermalModelStorage
 from .virtual_outdoor_utils import compute_planned_virtual_outdoor_temperatures
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,10 +111,14 @@ NOTIFY_FALLBACK_TRIGGER_AFTER = timedelta(minutes=30)
 NOTIFY_FALLBACK_COOLDOWN = timedelta(hours=6)
 NOTIFY_EXCEPTION_COOLDOWN = timedelta(minutes=30)
 MODEL_HISTORY_MAX_ENTRIES = 192  # ~48h at 15-minute sampling.
+NOMINAL_HEAT_POWER_KW = 3.0
 LEARNING_STABLE_WINDOW = timedelta(hours=6)
 LEARNING_STABLE_RELATIVE_DELTA = 0.05  # 5% relative change threshold.
 PRICE_HISTORY_BACKFILL_MIN_SAMPLES = 16  # Avoid noisy baseline after restart.
 PRICE_HISTORY_BACKFILL_MAX_ATTEMPTS = 5
+# Suppress sensor notifications right after startup to allow entities to populate.
+STARTUP_SENSOR_GRACE = timedelta(minutes=2)
+STARTUP_HEALTH_GRACE = timedelta(minutes=2)
 # Throttle sensor-driven control runs to avoid excessive solver executions.
 SENSOR_CONTROL_DEBOUNCE_SECONDS = 10
 SENSOR_CONTROL_MIN_INTERVAL_SECONDS = 60
@@ -100,6 +126,8 @@ INDOOR_TEMP_CONTROL_THRESHOLD = 0.1
 OUTDOOR_TEMP_CONTROL_THRESHOLD = 0.2
 WEATHER_FORECAST_CACHE_SECONDS = 30 * 60
 WEATHER_FORECAST_SERVICE_TYPE = "hourly"
+# Keep enough samples for the largest window even at the smallest control interval (5 min).
+PERFORMANCE_HISTORY_MAX_ENTRIES = 96 * 12
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
@@ -133,6 +161,9 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._monitor_only: bool = self._options[CONF_MONITOR_ONLY]
         self._virtual_heat_offset: float = self._options[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET]
         self._heat_loss_coeff: float = self._options[CONF_HEAT_LOSS_COEFFICIENT]
+        self._learning_model: str = self._options[CONF_LEARNING_MODEL]
+        self._rls_forgetting_factor: float = self._options[CONF_RLS_FORGETTING_FACTOR]
+        self._performance_window_hours: int = self._options[CONF_PERFORMANCE_WINDOW_HOURS]
         self._heating_supply_temp_entity: str | None = self._options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY)
         self._heating_supply_temp_threshold: float = float(
             self._options.get(CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD)
@@ -146,20 +177,30 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._heating_supply_temp_debounce_seconds: float = float(
             self._options.get(CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS, DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS)
         )
-        initial_heat_loss = self._options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE, self._heat_loss_coeff)
-        if initial_heat_loss is None:
-            initial_heat_loss = self._heat_loss_coeff
-        self._thermal_model = ThermalModelEstimator(
-            seed=self._options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
-            initial_heat_loss=initial_heat_loss,
-            initial_heat_gain=self._options.get(CONF_INITIAL_HEAT_GAIN),
-            initial_temp=self._options.get(CONF_INITIAL_INDOOR_TEMP),
+        self._overshoot_warm_bias_enabled: bool = bool(
+            self._options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED)
         )
+        self._overshoot_warm_bias_margin: float = float(
+            self._options.get(CONF_OVERSHOOT_WARM_BIAS_MARGIN, DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN)
+        )
+        self._overshoot_warm_bias_full: float = float(
+            self._options.get(CONF_OVERSHOOT_WARM_BIAS_FULL, DEFAULT_OVERSHOOT_WARM_BIAS_FULL)
+        )
+        self._learning_supply_temp_on_margin: float = float(
+            self._options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN)
+        )
+        self._learning_supply_temp_off_margin: float = float(
+            self._options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN)
+        )
+        self._thermal_model = self._build_thermal_model(self._options)
         self._thermal_store = ThermalModelStorage(
             hass.config.path(".storage", f"{DOMAIN}_{entry.entry_id}_thermal.json")
         )
         self._price_store = PriceHistoryStorage(
             hass.config.path(".storage", f"{DOMAIN}_{entry.entry_id}_prices.json")
+        )
+        self._performance_store = PerformanceHistoryStorage(
+            hass.config.path(".storage", f"{DOMAIN}_{entry.entry_id}_performance.json")
         )
 
         self._controller = MpcController(
@@ -169,6 +210,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             prediction_horizon_hours=self._prediction_horizon,
             heat_loss_coeff=self._heat_loss_coeff,
             heat_gain_coeff=self._thermal_model.heat_gain_coeff,
+            overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
+            overshoot_warm_bias_margin=self._overshoot_warm_bias_margin,
+            overshoot_warm_bias_full=self._overshoot_warm_bias_full,
         )
 
         self._indoor_temp: float | None = None
@@ -202,9 +246,17 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._heating_detected: bool | None = None
         self._heating_detected_candidate: bool | None = None
         self._heating_detected_candidate_since = None
+        self._heating_duty_cycle_on_seconds = 0.0
+        self._heating_duty_cycle_known_seconds = 0.0
+        self._heating_duty_cycle_last_time = None
+        self._heating_duty_cycle_last_state: bool | None = None
         self._notification_tracker = NotificationTracker()
+        self._startup_time = dt_util.utcnow()
+        self._performance_history: list[PerformanceSample] = []
+        self._last_prediction: dict[str, Any] | None = None
+        self._last_performance_persist_time = None
 
-        self._attr_name = "MPC Heat Pump"
+        self._attr_name = "Heat Pump Pilot"
         self._attr_unique_id = f"{entry.entry_id}_climate"
         self._attr_temperature_unit = hass.config.units.temperature_unit
         self._attr_hvac_action = HVACAction.IDLE
@@ -218,6 +270,7 @@ class MpcHeatPumpClimate(ClimateEntity):
 
         await self._load_price_history()
         await self._load_thermal_state()
+        await self._load_performance_history()
         self._schedule_control_loop()
         await self._async_run_control()
         self._schedule_price_history_backfill(30)
@@ -231,6 +284,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         if self._options_unsub:
             self._options_unsub()
         await self._persist_thermal_state(dt_util.utcnow())
+        await self._persist_performance_history(dt_util.utcnow())
         await self._persist_price_history()
 
     async def _load_price_history(self) -> None:
@@ -394,7 +448,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._request_control_run()
 
     async def _load_thermal_state(self) -> None:
-        """Load persisted EKF state if available."""
+        """Load persisted thermal model state if available."""
         payload = await self.hass.async_add_executor_job(self._thermal_store.load)
         if payload and self._thermal_model.restore(payload):
             _LOGGER.debug("Restored thermal model state for %s", self.entity_id)
@@ -402,13 +456,146 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._controller.update_settings(
                 heat_loss_coeff=self._heat_loss_coeff, heat_gain_coeff=self._thermal_model.heat_gain_coeff
             )
+            self._restore_model_history(payload)
 
     async def _persist_thermal_state(self, now) -> None:
-        """Persist EKF state to disk throttled to a safe cadence."""
+        """Persist thermal model state to disk throttled to a safe cadence."""
         if self._last_persist_time and (now - self._last_persist_time) < THERMAL_PERSIST_INTERVAL:
             return
-        await self.hass.async_add_executor_job(self._thermal_store.save, self._thermal_model.export_state())
+        snapshot = self._thermal_model.export_state()
+        payload = {
+            "version": 2,
+            **snapshot,
+            "history": self._serialize_model_history(),
+        }
+        await self.hass.async_add_executor_job(self._thermal_store.save, payload)
         self._last_persist_time = now
+
+    async def _load_performance_history(self) -> None:
+        """Load persisted performance history if available."""
+        payload = await self.hass.async_add_executor_job(self._performance_store.load)
+        if not payload:
+            return
+        raw_history = payload.get("history")
+        if not isinstance(raw_history, list):
+            return
+        history: list[PerformanceSample] = []
+        for entry in raw_history:
+            if not isinstance(entry, dict):
+                continue
+            when_raw = entry.get("time")
+            if not isinstance(when_raw, str):
+                continue
+            when = dt_util.parse_datetime(when_raw)
+            if when is None:
+                continue
+            try:
+                when = dt_util.as_utc(when)
+            except (TypeError, ValueError):
+                continue
+            indoor_raw = entry.get("indoor_temp")
+            target_raw = entry.get("target_temp")
+            try:
+                indoor = float(indoor_raw)
+                target = float(target_raw)
+            except (TypeError, ValueError):
+                continue
+            heating_detected = entry.get("heating_detected")
+            if heating_detected not in (None, True, False):
+                heating_detected = None
+            price_raw = entry.get("price")
+            prediction_raw = entry.get("prediction_error")
+            try:
+                price = float(price_raw) if price_raw is not None else None
+            except (TypeError, ValueError):
+                price = None
+            try:
+                prediction_error = float(prediction_raw) if prediction_raw is not None else None
+            except (TypeError, ValueError):
+                prediction_error = None
+            history.append(
+                PerformanceSample(
+                    when=when,
+                    indoor_temp=indoor,
+                    target_temp=target,
+                    heating_detected=heating_detected,
+                    price=price,
+                    prediction_error=prediction_error,
+                )
+            )
+        if history:
+            self._performance_history = history[-PERFORMANCE_HISTORY_MAX_ENTRIES:]
+
+    async def _persist_performance_history(self, now) -> None:
+        """Persist performance history to disk throttled to a safe cadence."""
+        if self._last_performance_persist_time and (now - self._last_performance_persist_time) < THERMAL_PERSIST_INTERVAL:
+            return
+        serialized: list[dict[str, Any]] = []
+        for sample in self._performance_history:
+            when = sample.when
+            try:
+                when = dt_util.as_utc(when)
+            except (TypeError, ValueError):
+                continue
+            serialized.append(
+                {
+                    "time": when.isoformat(),
+                    "indoor_temp": sample.indoor_temp,
+                    "target_temp": sample.target_temp,
+                    "heating_detected": sample.heating_detected,
+                    "price": sample.price,
+                    "prediction_error": sample.prediction_error,
+                }
+            )
+        payload = {"version": 1, "history": serialized}
+        await self.hass.async_add_executor_job(self._performance_store.save, payload)
+        self._last_performance_persist_time = now
+
+    def _serialize_model_history(self) -> list[list[Any]]:
+        """Return model history as JSON-friendly triples."""
+        serialized: list[list[Any]] = []
+        for when, loss, gain in self._model_history:
+            if isinstance(when, str):
+                parsed = dt_util.parse_datetime(when)
+                when_dt = parsed if parsed is not None else None
+            else:
+                when_dt = when
+            if when_dt is None:
+                continue
+            try:
+                when_dt = dt_util.as_utc(when_dt)
+                serialized.append([when_dt.isoformat(), float(loss), float(gain)])
+            except (TypeError, ValueError):
+                continue
+        return serialized
+
+    def _restore_model_history(self, payload: dict[str, Any]) -> None:
+        """Restore model history from a persisted snapshot."""
+        raw_history = payload.get("history")
+        if not isinstance(raw_history, list):
+            return
+        history: list[tuple[Any, float, float]] = []
+        for entry in raw_history:
+            when_raw = loss_raw = gain_raw = None
+            if isinstance(entry, dict):
+                when_raw = entry.get("time")
+                loss_raw = entry.get("loss")
+                gain_raw = entry.get("gain")
+            elif isinstance(entry, list) and len(entry) == 3:
+                when_raw, loss_raw, gain_raw = entry
+            else:
+                continue
+            if not isinstance(when_raw, str):
+                continue
+            when = dt_util.parse_datetime(when_raw)
+            if when is None:
+                continue
+            try:
+                history.append((dt_util.as_utc(when), float(loss_raw), float(gain_raw)))
+            except (TypeError, ValueError):
+                continue
+        if history:
+            self._model_history = history[-MODEL_HISTORY_MAX_ENTRIES:]
 
     @property
     def temperature_unit(self) -> str | None:
@@ -451,6 +638,18 @@ class MpcHeatPumpClimate(ClimateEntity):
             current_price, history_baseline_24h
         )
         heating_detected = self._get_heating_detected(dt_util.utcnow())
+        nominal_heat_power_kw = NOMINAL_HEAT_POWER_KW
+        time_step_hours = self._controller.time_step_hours
+        cap_kwh_per_c = None
+        res_c_per_kw = None
+        try:
+            if self._thermal_model.heat_gain_coeff > 0 and time_step_hours > 0:
+                cap_kwh_per_c = (time_step_hours * nominal_heat_power_kw) / self._thermal_model.heat_gain_coeff
+                if self._thermal_model.heat_loss_coeff > 0:
+                    res_c_per_kw = time_step_hours / (self._thermal_model.heat_loss_coeff * cap_kwh_per_c)
+        except (TypeError, ValueError, ZeroDivisionError):
+            cap_kwh_per_c = None
+            res_c_per_kw = None
         return {
             "suggested_heat_on": self._last_control_on,
             "suggested_virtual_outdoor_temperature": suggested_virtual_outdoor_temperature,
@@ -473,12 +672,17 @@ class MpcHeatPumpClimate(ClimateEntity):
             "estimated_heat_loss_coefficient": self._thermal_model.heat_loss_coeff,
             "estimated_heat_gain_coefficient": self._thermal_model.heat_gain_coeff,
             "estimated_indoor_temperature": self._thermal_model.indoor_temp,
+            "nominal_heat_power_kw": nominal_heat_power_kw,
+            "estimated_thermal_capacitance_kwh_per_c": cap_kwh_per_c,
+            "estimated_thermal_resistance_c_per_kw": res_c_per_kw,
             "thermal_model_heat_on_source": self._thermal_model_heat_on_source(),
             "heating_supply_temp_entity": self._heating_supply_temp_entity,
             "heating_supply_temp_threshold": self._heating_supply_temp_threshold,
             "heating_detection_enabled": self._heating_detection_active(),
             "heating_supply_temp_hysteresis": self._heating_supply_temp_hysteresis,
             "heating_supply_temp_debounce_seconds": self._heating_supply_temp_debounce_seconds,
+            "learning_model": self._learning_model,
+            "rls_forgetting_factor": self._rls_forgetting_factor,
             "heating_detected": heating_detected,
             "heating_supply_temperature": self._get_state_as_float(self._heating_supply_temp_entity)
             if self._heating_supply_temp_entity
@@ -558,6 +762,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             if outdoor_temp is not None:
                 self._outdoor_temp = outdoor_temp
 
+            prediction_error = self._compute_prediction_error(now, indoor_temp)
+
             self._update_thermal_model(now, indoor_temp, self._outdoor_temp)
             steps = max(1, int(self._prediction_horizon / self._controller.time_step_hours))
             price_forecast = self._extract_price_forecast(now)
@@ -581,9 +787,26 @@ class MpcHeatPumpClimate(ClimateEntity):
             await self._apply_control(decision)
             self._last_control_on = decision
             self._last_control_time = now
+            if result is not None:
+                self._last_prediction = {
+                    "time": now,
+                    "step_hours": self._controller.time_step_hours,
+                    "temps": list(result.predicted_temperatures),
+                }
+            current_price = price_for_mpc[0] if price_for_mpc else None
+            heating_detected = self._get_heating_detected(now)
+            self._record_performance_sample(
+                now,
+                indoor_temp=indoor_temp,
+                target_temp=self._target_temperature,
+                heating_detected=heating_detected,
+                price=current_price,
+                prediction_error=prediction_error,
+            )
             self._publish_decision()
             await self._async_update_notifications(now)
             await self._persist_thermal_state(now)
+            await self._persist_performance_history(now)
             self.async_write_ha_state()
 
     def _schedule_control_loop(self) -> None:
@@ -616,6 +839,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._controller.update_settings(
             heat_loss_coeff=self._heat_loss_coeff, heat_gain_coeff=self._thermal_model.heat_gain_coeff
         )
+        if self._heating_detection_active():
+            self._reset_heating_duty_cycle(now)
 
     def _record_model_history(self, now) -> None:
         """Record learned coefficients for learning/health status."""
@@ -696,13 +921,53 @@ class MpcHeatPumpClimate(ClimateEntity):
             return True
         return False
 
+    def _accumulate_heating_duty_cycle(self, now) -> None:
+        """Accumulate heating duty-cycle time since the last update."""
+        last_time = self._heating_duty_cycle_last_time
+        if last_time is None:
+            self._heating_duty_cycle_last_time = now
+            self._heating_duty_cycle_last_state = self._heating_detected
+            return
+        try:
+            delta = (now - last_time).total_seconds()
+        except (TypeError, ValueError):
+            delta = 0.0
+        if delta <= 0:
+            self._heating_duty_cycle_last_time = now
+            self._heating_duty_cycle_last_state = self._heating_detected
+            return
+        if self._heating_duty_cycle_last_state is True:
+            self._heating_duty_cycle_on_seconds += delta
+            self._heating_duty_cycle_known_seconds += delta
+        elif self._heating_duty_cycle_last_state is False:
+            self._heating_duty_cycle_known_seconds += delta
+        self._heating_duty_cycle_last_time = now
+        self._heating_duty_cycle_last_state = self._heating_detected
+
+    def _heating_duty_cycle_ratio(self) -> float | None:
+        """Return the fraction of known time spent heating."""
+        if self._heating_duty_cycle_known_seconds <= 0:
+            return None
+        ratio = self._heating_duty_cycle_on_seconds / self._heating_duty_cycle_known_seconds
+        return max(0.0, min(1.0, ratio))
+
+    def _reset_heating_duty_cycle(self, now) -> None:
+        """Reset duty-cycle counters for the next control interval."""
+        self._heating_duty_cycle_on_seconds = 0.0
+        self._heating_duty_cycle_known_seconds = 0.0
+        self._heating_duty_cycle_last_time = now
+        self._heating_duty_cycle_last_state = self._heating_detected
+
     def _get_heating_detected(self, now=None) -> bool | None:
         """Return a best-effort 'heating is happening' signal."""
         if self._heating_detection_active():
             supply_temp = self._get_state_as_float(self._heating_supply_temp_entity)
             if now is None:
                 now = dt_util.utcnow()
+            self._accumulate_heating_duty_cycle(now)
             self._update_heating_detected_from_supply(now, supply_temp)
+            self._heating_duty_cycle_last_time = now
+            self._heating_duty_cycle_last_state = self._heating_detected
             return self._heating_detected
 
         entity_id = self._controlled_entity
@@ -725,7 +990,7 @@ class MpcHeatPumpClimate(ClimateEntity):
 
         return None
 
-    def _get_heat_on_for_model(self, now=None) -> bool | None:
+    def _get_heat_on_for_model(self, now=None) -> float | None:
         """Return a best-effort heat-on signal for the estimator.
 
         - When not in monitor-only mode, we assume the last applied decision was executed.
@@ -735,12 +1000,33 @@ class MpcHeatPumpClimate(ClimateEntity):
         if self._heating_detection_active():
             if now is None:
                 now = dt_util.utcnow()
+            self._accumulate_heating_duty_cycle(now)
             supply_temp = self._get_state_as_float(self._heating_supply_temp_entity)
             self._update_heating_detected_from_supply(now, supply_temp)
-            return self._heating_detected
+            self._heating_duty_cycle_last_time = now
+            self._heating_duty_cycle_last_state = self._heating_detected
+
+            duty_cycle = self._heating_duty_cycle_ratio()
+            if duty_cycle is not None:
+                return duty_cycle
+            if supply_temp is None:
+                return self._heating_detected
+
+            threshold = float(self._heating_supply_temp_threshold)
+            on_margin = max(0.0, float(self._learning_supply_temp_on_margin))
+            off_margin = max(0.0, float(self._learning_supply_temp_off_margin))
+
+            # Only return a signal when supply temperature is clearly on/off.
+            # Everything in between is treated as ambiguous so the estimator doesn't
+            # "learn" from low-power tails, DHW cycles, or other non-space-heating periods.
+            if supply_temp >= threshold + on_margin:
+                return 1.0
+            if supply_temp <= threshold - off_margin:
+                return 0.0
+            return None
 
         if not self._monitor_only:
-            return bool(self._last_control_on)
+            return float(self._last_control_on)
 
         entity_id = self._controlled_entity
         if not entity_id:
@@ -752,12 +1038,12 @@ class MpcHeatPumpClimate(ClimateEntity):
 
         domain = entity_id.split(".")[0]
         if domain == "switch":
-            return state_obj.state.lower() == "on"
+            return 1.0 if state_obj.state.lower() == "on" else 0.0
 
         if domain == "climate":
             hvac_action = state_obj.attributes.get("hvac_action")
             if isinstance(hvac_action, str):
-                return hvac_action.lower() == "heating"
+                return 1.0 if hvac_action.lower() == "heating" else 0.0
             return None
 
         return None
@@ -813,7 +1099,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._request_control_run_debounced()
             return
         if entity_id == self._heating_supply_temp_entity and self._heating_detection_active():
+            self._accumulate_heating_duty_cycle(now)
             changed = self._update_heating_detected_from_supply(now, value)
+            self._heating_duty_cycle_last_time = now
+            self._heating_duty_cycle_last_state = self._heating_detected
             self.async_write_ha_state()
             if changed:
                 self._request_control_run()
@@ -842,6 +1131,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._comfort_tolerance = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
         self._monitor_only = self._options[CONF_MONITOR_ONLY]
         self._virtual_heat_offset = self._options[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET]
+        self._learning_model = self._options[CONF_LEARNING_MODEL]
+        self._rls_forgetting_factor = self._options[CONF_RLS_FORGETTING_FACTOR]
         self._heating_supply_temp_entity = self._options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY)
         self._heating_supply_temp_threshold = float(
             self._options.get(CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD)
@@ -855,11 +1146,46 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._heating_supply_temp_debounce_seconds = float(
             self._options.get(CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS, DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS)
         )
+        self._overshoot_warm_bias_enabled = bool(
+            self._options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED)
+        )
+        self._overshoot_warm_bias_margin = float(
+            self._options.get(CONF_OVERSHOOT_WARM_BIAS_MARGIN, DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN)
+        )
+        self._overshoot_warm_bias_full = float(
+            self._options.get(CONF_OVERSHOOT_WARM_BIAS_FULL, DEFAULT_OVERSHOOT_WARM_BIAS_FULL)
+        )
+        self._learning_supply_temp_on_margin = float(
+            self._options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN)
+        )
+        self._learning_supply_temp_off_margin = float(
+            self._options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN)
+        )
+        self._performance_window_hours = self._options[CONF_PERFORMANCE_WINDOW_HOURS]
+        now = dt_util.utcnow()
+        if self._heating_detection_active():
+            self._reset_heating_duty_cycle(now)
+        else:
+            self._heating_duty_cycle_on_seconds = 0.0
+            self._heating_duty_cycle_known_seconds = 0.0
+            self._heating_duty_cycle_last_time = None
+            self._heating_duty_cycle_last_state = None
+
+        previous_learning_model = previous_options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL)
+        previous_rls_factor = self._state_to_float(previous_options.get(CONF_RLS_FORGETTING_FACTOR))
+        if previous_rls_factor is None:
+            previous_rls_factor = DEFAULT_RLS_FORGETTING_FACTOR
+        model_changed = previous_learning_model != self._learning_model
+        rls_changed = float(previous_rls_factor) != float(self._rls_forgetting_factor)
 
         # Only reseed (reset) the estimator when options that affect its initialization change.
         # This avoids wiping learning progress when a user tweaks unrelated settings like the
         # heating detection threshold/hysteresis.
-        if should_reseed_thermal_model(previous_options, self._options):
+        if model_changed or rls_changed:
+            self._thermal_model = self._build_thermal_model(self._options)
+            self._heat_loss_coeff = self._thermal_model.heat_loss_coeff
+            self._model_history = []
+        elif should_reseed_thermal_model(previous_options, self._options):
             self._heat_loss_coeff = self._options[CONF_HEAT_LOSS_COEFFICIENT]
             initial_heat_loss = self._options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE)
             if initial_heat_loss is None:
@@ -883,6 +1209,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             prediction_horizon_hours=self._prediction_horizon,
             heat_loss_coeff=self._heat_loss_coeff,
             heat_gain_coeff=self._thermal_model.heat_gain_coeff,
+            overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
+            overshoot_warm_bias_margin=self._overshoot_warm_bias_margin,
+            overshoot_warm_bias_full=self._overshoot_warm_bias_full,
         )
         self._resubscribe_sensors()
         self._schedule_control_loop()
@@ -911,9 +1240,11 @@ class MpcHeatPumpClimate(ClimateEntity):
             desired = float(self._last_virtual_outdoor)
 
             state_obj = self.hass.states.get(entity_id)
+            step = None
             if state_obj is not None:
                 min_attr = state_obj.attributes.get("min")
                 max_attr = state_obj.attributes.get("max")
+                step_attr = state_obj.attributes.get("step")
                 try:
                     minimum = float(min_attr) if min_attr is not None else None
                 except (TypeError, ValueError):
@@ -926,14 +1257,30 @@ class MpcHeatPumpClimate(ClimateEntity):
                     desired = max(minimum, desired)
                 if maximum is not None:
                     desired = min(maximum, desired)
+                try:
+                    step = float(step_attr) if step_attr is not None else None
+                except (TypeError, ValueError):
+                    step = None
+
+            desired_str = None
+            desired_float = desired
+            if step is not None and step > 0:
+                step_dec = Decimal(str(step))
+                desired_dec = Decimal(str(desired_float))
+                rounded_dec = (desired_dec / step_dec).to_integral_value(rounding=ROUND_HALF_UP) * step_dec
+                decimals = max(0, -step_dec.as_tuple().exponent)
+                desired_float = float(rounded_dec)
+                desired_str = f"{desired_float:.{decimals}f}"
+            else:
+                desired_str = str(desired_float)
 
             current_value = self._get_state_as_float(entity_id)
-            if current_value is not None and abs(current_value - desired) < 0.01:
+            if current_value is not None and abs(current_value - desired_float) < 0.01:
                 return
             await self.hass.services.async_call(
                 "number",
                 "set_value",
-                {"entity_id": entity_id, "value": desired},
+                {"entity_id": entity_id, "value": desired_str},
                 blocking=False,
             )
             return
@@ -1036,17 +1383,33 @@ class MpcHeatPumpClimate(ClimateEntity):
         else:
             # When idle, let the pump see the actual outdoor temp (or a safe fallback).
             value = base
+            offset = max(0.0, float(self._virtual_heat_offset))
+            boost_total = 0.0
+
             # Price-aware suppression: push the virtual temp warmer during expensive slots.
             current_price = self._last_price_forecast[0] if self._last_price_forecast else None
             price_baseline = self._last_result.price_baseline if self._last_result else None
-            if current_price is not None and price_baseline and price_baseline > 0:
+            if current_price is not None and price_baseline and price_baseline > 0 and offset > 0:
                 ratio = current_price / price_baseline
                 if ratio > 1.0:
                     suppression = self._price_comfort_weight  # 0-1 weight from options.
-                    boost = suppression * (ratio - 1.0) * max(1.0, self._virtual_heat_offset)
-                    # Clamp the warm-shift so we never bias more than the configured offset.
-                    boost = min(boost, max(0.0, self._virtual_heat_offset))
-                    value += boost
+                    boost = suppression * (ratio - 1.0) * max(1.0, offset)
+                    boost_total += max(0.0, boost)
+
+            # Overshoot warm-bias: when indoor is above target, bias the curve warmer to back off heating.
+            if self._overshoot_warm_bias_enabled and self._indoor_temp is not None and offset > 0:
+                overshoot = float(self._indoor_temp) - float(self._target_temperature)
+                margin = max(0.0, float(self._overshoot_warm_bias_margin))
+                full = float(self._overshoot_warm_bias_full)
+                if full <= margin:
+                    full = margin + 1.0
+                if overshoot > margin:
+                    fraction = min(1.0, max(0.0, (overshoot - margin) / max(0.001, full - margin)))
+                    boost_total += fraction * offset
+
+            # Clamp the warm-shift so we never bias more than the configured offset.
+            boost_total = min(boost_total, offset)
+            value += boost_total
 
         # Never send a virtual outdoor warmer than 25C (summer/no heat).
         return min(value, MAX_VIRTUAL_OUTDOOR)
@@ -1372,6 +1735,43 @@ class MpcHeatPumpClimate(ClimateEntity):
         comfort_tolerance = self._state_to_float(options.get(CONF_COMFORT_TEMPERATURE_TOLERANCE))
         if comfort_tolerance is None:
             comfort_tolerance = DEFAULT_COMFORT_TEMPERATURE_TOLERANCE
+
+        overshoot_enabled = bool(options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED))
+        overshoot_margin = self._state_to_float(options.get(CONF_OVERSHOOT_WARM_BIAS_MARGIN))
+        if overshoot_margin is None:
+            overshoot_margin = DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN
+        overshoot_margin = max(0.0, float(overshoot_margin))
+
+        overshoot_full = self._state_to_float(options.get(CONF_OVERSHOOT_WARM_BIAS_FULL))
+        if overshoot_full is None:
+            overshoot_full = DEFAULT_OVERSHOOT_WARM_BIAS_FULL
+        overshoot_full = float(overshoot_full)
+        if overshoot_full <= overshoot_margin:
+            overshoot_full = overshoot_margin + 1.0
+
+        learning_on_margin = self._state_to_float(options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN))
+        if learning_on_margin is None:
+            learning_on_margin = DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN
+        learning_on_margin = max(0.0, float(learning_on_margin))
+
+        learning_off_margin = self._state_to_float(options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN))
+        if learning_off_margin is None:
+            learning_off_margin = DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN
+        learning_off_margin = max(0.0, float(learning_off_margin))
+        performance_window_raw = options.get(CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS)
+        try:
+            performance_window = int(performance_window_raw)
+        except (TypeError, ValueError):
+            performance_window = DEFAULT_PERFORMANCE_WINDOW_HOURS
+        if performance_window not in PERFORMANCE_WINDOW_OPTIONS:
+            performance_window = DEFAULT_PERFORMANCE_WINDOW_HOURS
+        learning_model = options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL)
+        if learning_model not in (LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
+            learning_model = DEFAULT_LEARNING_MODEL
+        rls_factor = self._state_to_float(options.get(CONF_RLS_FORGETTING_FACTOR))
+        if rls_factor is None:
+            rls_factor = DEFAULT_RLS_FORGETTING_FACTOR
+        rls_factor = min(1.0, max(0.9, float(rls_factor)))
         merged = {
             CONF_TARGET_TEMPERATURE: target_temperature,
             CONF_PRICE_COMFORT_WEIGHT: price_comfort_weight,
@@ -1382,8 +1782,14 @@ class MpcHeatPumpClimate(ClimateEntity):
             CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: options.get(
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET, DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET
             ),
+            CONF_OVERSHOOT_WARM_BIAS_ENABLED: overshoot_enabled,
+            CONF_OVERSHOOT_WARM_BIAS_MARGIN: overshoot_margin,
+            CONF_OVERSHOOT_WARM_BIAS_FULL: overshoot_full,
             CONF_HEAT_LOSS_COEFFICIENT: options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT),
             CONF_THERMAL_RESPONSE_SEED: options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
+            CONF_LEARNING_MODEL: learning_model,
+            CONF_RLS_FORGETTING_FACTOR: rls_factor,
+            CONF_PERFORMANCE_WINDOW_HOURS: performance_window,
             CONF_HEATING_SUPPLY_TEMP_ENTITY: options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY),
             CONF_HEATING_SUPPLY_TEMP_THRESHOLD: options.get(
                 CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD
@@ -1397,11 +1803,41 @@ class MpcHeatPumpClimate(ClimateEntity):
                 DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
                 minimum=0,
             ),
+            CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN: learning_on_margin,
+            CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN: learning_off_margin,
             CONF_INITIAL_INDOOR_TEMP: options.get(CONF_INITIAL_INDOOR_TEMP),
             CONF_INITIAL_HEAT_GAIN: options.get(CONF_INITIAL_HEAT_GAIN),
             CONF_INITIAL_HEAT_LOSS_OVERRIDE: options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE),
         }
         return merged
+
+    def _build_thermal_model(self, options: dict[str, Any]) -> ThermalModelEstimator | ThermalModelRlsEstimator:
+        """Create a thermal model estimator based on options."""
+        base_loss = options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT)
+        initial_heat_loss = options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE, base_loss)
+        if initial_heat_loss is None:
+            initial_heat_loss = base_loss
+        learning_model = options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL)
+        if learning_model not in (LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
+            learning_model = DEFAULT_LEARNING_MODEL
+        rls_factor = self._state_to_float(options.get(CONF_RLS_FORGETTING_FACTOR))
+        if rls_factor is None:
+            rls_factor = DEFAULT_RLS_FORGETTING_FACTOR
+        rls_factor = min(1.0, max(0.9, float(rls_factor)))
+        if learning_model == LEARNING_MODEL_RLS:
+            return ThermalModelRlsEstimator(
+                seed=options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
+                initial_heat_loss=initial_heat_loss,
+                initial_heat_gain=options.get(CONF_INITIAL_HEAT_GAIN),
+                initial_temp=options.get(CONF_INITIAL_INDOOR_TEMP),
+                forgetting_factor=rls_factor,
+            )
+        return ThermalModelEstimator(
+            seed=options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
+            initial_heat_loss=initial_heat_loss,
+            initial_heat_gain=options.get(CONF_INITIAL_HEAT_GAIN),
+            initial_temp=options.get(CONF_INITIAL_INDOOR_TEMP),
+        )
 
     @staticmethod
     def _coerce_int(value: Any, default: int, minimum: int | None = None) -> int:
@@ -1422,6 +1858,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         health, health_reasons = self._compute_health(now)
         learning_state, learning_details = self._compute_learning_state(now)
         heating_detected = self._get_heating_detected(now)
+        overshoot_warm_bias_multiplier = self._comfort_overshoot_multiplier()
         current_price_raw = self._last_price_forecast[0] if self._last_price_forecast else None
         try:
             current_price = float(current_price_raw) if current_price_raw is not None else None
@@ -1434,6 +1871,9 @@ class MpcHeatPumpClimate(ClimateEntity):
         heating_supply_temperature = (
             self._get_state_as_float(self._heating_supply_temp_entity) if self._heating_supply_temp_entity else None
         )
+        heating_duty_cycle_ratio = None
+        if self._heating_detection_active():
+            heating_duty_cycle_ratio = self._heating_duty_cycle_ratio()
         heating_detected_source = (
             "heating_supply_temp_threshold"
             if self._heating_detection_active()
@@ -1450,10 +1890,15 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._last_result.sequence if self._last_result else None,
             self._last_outdoor_forecast,
             self._last_price_forecast,
+            predicted_temperatures=self._last_result.predicted_temperatures if self._last_result else None,
             base_outdoor_fallback=float(base_outdoor_fallback),
             virtual_heat_offset=self._virtual_heat_offset,
             price_comfort_weight=self._price_comfort_weight,
             price_baseline=self._last_result.price_baseline if self._last_result else None,
+            target_temperature=self._target_temperature,
+            overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
+            overshoot_warm_bias_margin=self._overshoot_warm_bias_margin,
+            overshoot_warm_bias_full=self._overshoot_warm_bias_full,
             max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
         )
         payload = {
@@ -1480,7 +1925,16 @@ class MpcHeatPumpClimate(ClimateEntity):
             "heating_supply_temp_hysteresis": self._heating_supply_temp_hysteresis,
             "heating_supply_temp_debounce_seconds": self._heating_supply_temp_debounce_seconds,
             "heating_supply_temperature": heating_supply_temperature,
+            "heating_duty_cycle_ratio": heating_duty_cycle_ratio,
             "virtual_outdoor_heat_offset": self._virtual_heat_offset,
+            "overshoot_warm_bias_enabled": self._overshoot_warm_bias_enabled,
+            "overshoot_warm_bias_margin": self._overshoot_warm_bias_margin,
+            "overshoot_warm_bias_full": self._overshoot_warm_bias_full,
+            "overshoot_warm_bias_multiplier": overshoot_warm_bias_multiplier,
+            "learning_supply_temp_on_margin": self._learning_supply_temp_on_margin,
+            "learning_supply_temp_off_margin": self._learning_supply_temp_off_margin,
+            "learning_model": self._learning_model,
+            "rls_forgetting_factor": self._rls_forgetting_factor,
             "heat_loss_coefficient": self._heat_loss_coeff,
             "price_baseline": self._last_result.price_baseline if self._last_result else None,
             "current_price": current_price,
@@ -1501,7 +1955,26 @@ class MpcHeatPumpClimate(ClimateEntity):
         }
         entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(self.config_entry.entry_id, {})
         entry_data["last_decision"] = payload
+        entry_data["performance"] = self._compute_performance_summary(now)
         async_dispatcher_send(self.hass, f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}")
+
+    def _comfort_overshoot_multiplier(self) -> float | None:
+        """Return the active above-target comfort penalty multiplier."""
+        if self._indoor_temp is None:
+            return None
+        if not self._overshoot_warm_bias_enabled:
+            return 1.0
+        delta = float(self._indoor_temp) - float(self._target_temperature)
+        if delta <= 0.0:
+            return 1.0
+        margin = max(0.0, float(self._overshoot_warm_bias_margin))
+        full = float(self._overshoot_warm_bias_full)
+        if full <= margin:
+            full = margin + 1.0
+        if delta <= margin:
+            return 1.0
+        fraction = min(1.0, max(0.0, (delta - margin) / max(0.001, full - margin)))
+        return 1.0 + fraction
 
     def _notification_id(self, event_id: str) -> str:
         return f"{DOMAIN}_{self.config_entry.entry_id}_{event_id}"
@@ -1638,6 +2111,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         health, reasons = self._compute_health(now)
         health_signature = None if health == "healthy" else health
         health_trigger_after = timedelta(0)
+        if (now - self._startup_time) < STARTUP_HEALTH_GRACE:
+            health_signature = None
         if health_signature and reasons == ["no_control_run_yet"]:
             health_trigger_after = timedelta(minutes=max(2 * int(self._control_interval), 15))
         if health_signature:
@@ -1650,7 +2125,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                         f"Health state: {health}",
                         f"Reasons: {reason_text}",
                         "",
-                        "See the diagnostic sensors (e.g. 'MPC Heat Pump Decision') for details.",
+                        "See the diagnostic sensors (e.g. 'Heat Pump Pilot Decision') for details.",
                     ]
                 ),
             )
@@ -1665,7 +2140,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         )
 
         # 2) Sensor staleness/unavailability.
-        sensor_issues = self._collect_sensor_issues(now)
+        if (now - self._startup_time) < STARTUP_SENSOR_GRACE:
+            sensor_issues = []
+        else:
+            sensor_issues = self._collect_sensor_issues(now)
         sensors_signature = None if not sensor_issues else "|".join(f"{eid}:{problem}" for (eid, problem, _age) in sensor_issues)
         if sensors_signature:
             lines = ["One or more input entities are unavailable or stale:"]
@@ -1945,3 +2423,89 @@ class MpcHeatPumpClimate(ClimateEntity):
         if domain == "climate":
             return "controlled_entity_climate_hvac_action"
         return "none"
+
+    def _compute_prediction_error(self, now, indoor_temp: float) -> float | None:
+        """Compare current temperature to last prediction, if available."""
+        if not self._last_prediction:
+            return None
+        origin = self._last_prediction.get("time")
+        step_hours = self._last_prediction.get("step_hours")
+        temps = self._last_prediction.get("temps")
+        if origin is None or step_hours is None or not temps:
+            return None
+        try:
+            elapsed_hours = (dt_util.as_utc(now) - dt_util.as_utc(origin)).total_seconds() / 3600
+        except (TypeError, ValueError):
+            return None
+        if elapsed_hours <= 0 or step_hours <= 0:
+            return None
+        index = int(round(elapsed_hours / step_hours))
+        if index <= 0:
+            return None
+        if index >= len(temps):
+            index = len(temps) - 1
+        try:
+            predicted = float(temps[index])
+        except (TypeError, ValueError):
+            return None
+        return float(indoor_temp) - predicted
+
+    def _record_performance_sample(
+        self,
+        now,
+        *,
+        indoor_temp: float,
+        target_temp: float,
+        heating_detected: bool | None,
+        price: float | None,
+        prediction_error: float | None,
+    ) -> None:
+        """Store a performance sample for scoring."""
+        try:
+            when = dt_util.as_utc(now)
+        except (TypeError, ValueError):
+            when = dt_util.utcnow()
+        try:
+            indoor = float(indoor_temp)
+            target = float(target_temp)
+        except (TypeError, ValueError):
+            return
+        sample = PerformanceSample(
+            when=when,
+            indoor_temp=indoor,
+            target_temp=target,
+            heating_detected=heating_detected,
+            price=price,
+            prediction_error=prediction_error,
+        )
+        self._performance_history.append(sample)
+        if len(self._performance_history) > PERFORMANCE_HISTORY_MAX_ENTRIES:
+            self._performance_history = self._performance_history[-PERFORMANCE_HISTORY_MAX_ENTRIES:]
+
+    def _compute_performance_summary(self, now) -> dict[str, Any]:
+        """Compute performance metrics over the configured window."""
+        window_hours = self._performance_window_hours
+        try:
+            cutoff = dt_util.as_utc(now) - timedelta(hours=window_hours)
+        except (TypeError, ValueError):
+            cutoff = dt_util.utcnow() - timedelta(hours=window_hours)
+        samples = [sample for sample in self._performance_history if sample.when >= cutoff]
+
+        comfort_score, comfort_details = compute_comfort_score(samples, self._comfort_tolerance)
+        price_score, price_details = compute_price_score(samples)
+        prediction_mae, prediction_details = compute_prediction_accuracy(samples)
+
+        comfort_details["window_hours"] = window_hours
+        price_details["window_hours"] = window_hours
+        price_details["sample_interval_minutes"] = self._control_interval
+        prediction_details["window_hours"] = window_hours
+
+        return {
+            "window_hours": window_hours,
+            "comfort_score": comfort_score,
+            "comfort_details": comfort_details,
+            "price_score": price_score,
+            "price_details": price_details,
+            "prediction_mae": prediction_mae,
+            "prediction_details": prediction_details,
+        }

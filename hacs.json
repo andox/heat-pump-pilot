@@ -1,0 +1,7 @@
+{
+  "name": "Heat Pump Pilot",
+  "domains": [
+    "climate"
+  ],
+  "render_readme": false
+}

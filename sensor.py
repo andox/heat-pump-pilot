@@ -23,6 +23,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             MpcHeatPumpLearningStateSensor(hass, entry),
             MpcHeatPumpPriceStateSensor(hass, entry),
             MpcHeatPumpVirtualOutdoorSensor(hass, entry),
+            MpcHeatPumpComfortScoreSensor(hass, entry),
+            MpcHeatPumpPriceScoreSensor(hass, entry),
+            MpcHeatPumpPredictionAccuracySensor(hass, entry),
         ]
     )
 
@@ -65,15 +68,54 @@ class _MpcHeatPumpBaseSensor(SensorEntity):
         return self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {}).get("last_decision")
 
 
+class _MpcHeatPumpPerformanceSensor(SensorEntity):
+    """Common behaviour for sensors driven by performance summaries."""
+
+    _attr_should_poll = False
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self.config_entry = entry
+        self._performance: dict[str, Any] | None = None
+        self._unsub = None
+
+    async def async_added_to_hass(self) -> None:
+        """Register for updates."""
+        self._performance = self._get_entry_state()
+        self._unsub = async_dispatcher_connect(
+            self.hass,
+            f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}",
+            self._handle_update,
+        )
+        if self._unsub:
+            self.async_on_remove(self._unsub)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Clean up listeners."""
+        if self._unsub:
+            self._unsub()
+
+    @callback
+    def _handle_update(self) -> None:
+        """Receive performance updates from the climate entity."""
+        self._performance = self._get_entry_state()
+        self.async_write_ha_state()
+
+    def _get_entry_state(self) -> dict[str, Any] | None:
+        """Fetch the last performance summary stored for this entry."""
+        return self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {}).get("performance")
+
+
 class MpcHeatPumpDecisionSensor(_MpcHeatPumpBaseSensor):
     """Expose the latest MPC decision as a diagnostic sensor."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:brain"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the sensor."""
         super().__init__(hass, entry)
-        self._attr_name = "MPC Heat Pump Decision"
+        self._attr_name = "Heat Pump Pilot Decision"
         self._attr_unique_id = f"{entry.entry_id}_decision"
 
     @property
@@ -93,10 +135,11 @@ class MpcHeatPumpHealthSensor(_MpcHeatPumpBaseSensor):
     """High-level system health for the controller."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:heart-pulse"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
-        self._attr_name = "MPC Heat Pump Health"
+        self._attr_name = "Heat Pump Pilot Health"
         self._attr_unique_id = f"{entry.entry_id}_health"
 
     @property
@@ -121,10 +164,11 @@ class MpcHeatPumpControlStateSensor(_MpcHeatPumpBaseSensor):
     """Expose whether the integration is monitoring or controlling."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:toggle-switch"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
-        self._attr_name = "MPC Heat Pump Control State"
+        self._attr_name = "Heat Pump Pilot Control State"
         self._attr_unique_id = f"{entry.entry_id}_control_state"
 
     @property
@@ -150,10 +194,11 @@ class MpcHeatPumpLearningStateSensor(_MpcHeatPumpBaseSensor):
     """Expose whether the estimator is learning or stable."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:school"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
-        self._attr_name = "MPC Heat Pump Learning State"
+        self._attr_name = "Heat Pump Pilot Learning State"
         self._attr_unique_id = f"{entry.entry_id}_learning_state"
 
     @property
@@ -173,10 +218,11 @@ class MpcHeatPumpPriceStateSensor(_MpcHeatPumpBaseSensor):
     """Expose the current electricity price classification."""
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:currency-usd"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
-        self._attr_name = "MPC Heat Pump Price State"
+        self._attr_name = "Heat Pump Pilot Price State"
         self._attr_unique_id = f"{entry.entry_id}_price_state"
 
     @property
@@ -208,10 +254,11 @@ class MpcHeatPumpVirtualOutdoorSensor(_MpcHeatPumpBaseSensor):
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_force_update = True
+    _attr_icon = "mdi:thermometer"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
-        self._attr_name = "MPC Heat Pump Virtual Outdoor"
+        self._attr_name = "Heat Pump Pilot Virtual Outdoor"
         self._attr_unique_id = f"{entry.entry_id}_virtual_outdoor"
         self._attr_native_unit_of_measurement = hass.config.units.temperature_unit
 
@@ -226,3 +273,100 @@ class MpcHeatPumpVirtualOutdoorSensor(_MpcHeatPumpBaseSensor):
             return float(value)
         except (TypeError, ValueError):
             return None
+
+
+class MpcHeatPumpComfortScoreSensor(_MpcHeatPumpPerformanceSensor):
+    """Expose a comfort score based on time within tolerance."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:thermometer-check"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_name = "Heat Pump Pilot Comfort Score"
+        self._attr_unique_id = f"{entry.entry_id}_comfort_score"
+        self._attr_native_unit_of_measurement = "%"
+
+    @property
+    def native_value(self) -> float | None:
+        if not self._performance:
+            return None
+        value = self._performance.get("comfort_score")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if not self._performance:
+            return {}
+        return self._performance.get("comfort_details") or {}
+
+
+class MpcHeatPumpPriceScoreSensor(_MpcHeatPumpPerformanceSensor):
+    """Expose a price score based on heating during lower prices."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:cash-100"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_name = "Heat Pump Pilot Price Score"
+        self._attr_unique_id = f"{entry.entry_id}_price_score"
+        self._attr_native_unit_of_measurement = "%"
+
+    @property
+    def native_value(self) -> float | None:
+        if not self._performance:
+            return None
+        value = self._performance.get("price_score")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if not self._performance:
+            return {}
+        return self._performance.get("price_details") or {}
+
+
+class MpcHeatPumpPredictionAccuracySensor(_MpcHeatPumpPerformanceSensor):
+    """Expose prediction accuracy (MAE) for indoor temperature."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:target"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(hass, entry)
+        self._attr_name = "Heat Pump Pilot Prediction Accuracy"
+        self._attr_unique_id = f"{entry.entry_id}_prediction_accuracy"
+        self._attr_native_unit_of_measurement = hass.config.units.temperature_unit
+
+    @property
+    def native_value(self) -> float | None:
+        if not self._performance:
+            return None
+        value = self._performance.get("prediction_mae")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if not self._performance:
+            return {}
+        return self._performance.get("prediction_details") or {}

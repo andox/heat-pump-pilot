@@ -1,0 +1,233 @@
+# Heat Pump Pilot
+
+Heat Pump Pilot is a custom Home Assistant integration that runs a lightweight
+MPC (model predictive control) loop to steer a heat pump through a "virtual
+outdoor temperature" setpoint. It balances comfort vs electricity price and
+continuously learns a simple thermal model of your home.
+
+Repository: https://github.com/andox/heat-pump-pilot
+
+## Features
+- MPC optimizer (binary on/off) with price vs comfort weighting.
+- Virtual outdoor temperature control with price-aware warm bias.
+- Two learning models: EKF (extended Kalman filter) or RLS (recursive least squares).
+- Optional heating detection via supply/flow temperature sensor.
+- Diagnostic sensors for decisions, health, learning state, price state, and scores.
+- Comfort score, price score, and prediction accuracy metrics.
+- Learning, price history, and performance history persist across restarts.
+
+## Installation
+
+### HACS (recommended)
+1. Add this repository (`https://github.com/andox/heat-pump-pilot`) as a custom HACS integration.
+2. Install "Heat Pump Pilot".
+3. Restart Home Assistant.
+
+### Manual
+1. Copy `custom_components/heat_pump_pilot` into your Home Assistant
+   `config/custom_components/` directory.
+2. Restart Home Assistant.
+
+## Configuration (UI)
+Add the integration via **Settings > Devices & Services > Add Integration**.
+
+Required entities:
+- Indoor temperature sensor (`sensor.*`).
+- Outdoor temperature sensor (`sensor.*`).
+- Price sensor (`sensor.*`).
+- Weather entity (`weather.*` or a sensor with a `forecast` attribute). The integration will
+  fall back to a flat forecast from the outdoor sensor if forecast data is unavailable.
+
+Optional entities:
+- Controlled entity (the output target you want the integration to drive).
+- Heating supply/flow temperature sensor for heating detection.
+
+### Controlled entity types
+Heat Pump Pilot will attempt to control different entity types:
+- `number`: best for "virtual outdoor temperature" setpoints. Uses `number.set_value`.
+- `switch`: on/off control.
+- `climate`: sets target temperature and `hvac_mode`.
+- Other domains: tries `set_temperature` or `turn_on/turn_off` if available.
+
+### Monitor only mode
+When **monitor_only** is enabled, Heat Pump Pilot will *not* call any control
+services. It still computes decisions, forecasts, and diagnostics, but the heat
+signal used for learning must come from a supply temperature sensor or a
+controlled entity state (switch on / climate hvac_action == heating). If no
+reliable heat signal exists, learning is disabled.
+
+## Configuration options and defaults
+Below are the main options exposed in the config/option flows, with defaults and
+recommended values when you’re unsure. Values are in the UI unless noted.
+
+Core control:
+- Target temperature (default: 21.0°C): your comfort setpoint; set to your normal desired indoor temp.
+- Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.7–0.95.
+- Control interval (default: 15 min): how often MPC runs; keep 15–30 min unless you have slow sensors.
+- Prediction horizon (default: 24 h): MPC planning horizon; 12–24 h is typical.
+- Comfort tolerance (default: 1.0°C): deadband before comfort penalty; 0.5–1.5°C is typical.
+- Monitor only (default: false): true to disable control actions.
+
+Virtual outdoor control:
+- Virtual outdoor heat offset (default: 5.0°C): how much colder to request when heating; start at 3–8°C.
+- Overshoot warm bias enabled (default: true): warm bias when predicted above target; also boosts MPC comfort penalty when above target.
+- Overshoot warm bias margin (default: 0.3°C): overshoot before bias starts; 0.2–0.5°C is common.
+- Overshoot warm bias full (default: 1.5°C): overshoot at which bias reaches full strength.
+
+Learning:
+- Learning model (default: ekf): ekf is stable; rls can react faster to changes.
+- RLS forgetting factor (default: 0.99): lower = faster adaptation; 0.97–0.995 is typical.
+- Thermal response seed (default: 0.5): initial guess for loss/gain; leave default unless you know your system.
+- Base heat loss coefficient (default: 0.05): used until learning refines it; leave default in most cases.
+- Initial indoor temp (default: unset): optional override; leave empty to use sensor value.
+- Initial heat gain coefficient (default: unset): optional; leave empty unless you have a known value.
+- Initial heat loss override (default: unset): optional; leave empty unless you have a known value.
+
+Heating detection:
+- Heating supply/flow temp entity (default: unset): optional but strongly recommended for better learning.
+- Heating detection enabled (default: false unless a sensor is set).
+- Supply temp threshold (default: 30°C): set to your pump’s “heating on” supply threshold.
+- Supply temp hysteresis (default: 1.0°C): helps avoid chatter.
+- Supply temp debounce (default: 60 s): helps avoid false positives on short spikes.
+- Learning supply temp on/off margins (default: 1.0°C): extra buffer around the threshold for learning.
+
+Performance metrics:
+- Performance window (default: 24 h): 6/12/24/48/72/96 hours; 24–48 h is a good balance.
+
+## Virtual outdoor temperature
+The integration computes a "virtual outdoor" temperature and applies it to the
+controlled entity. The mapping is:
+- If heating is requested: `virtual = outdoor - virtual_heat_offset`.
+- If idle: `virtual = outdoor + warm_bias`, where warm_bias depends on price and
+  (optionally) indoor overshoot. Warm bias is capped by `virtual_heat_offset`.
+- A hard cap of 25C prevents pushing the pump into summer/no-heat mode.
+When overshoot warm bias is enabled, the MPC comfort penalty becomes asymmetric:
+above-target errors are penalized more strongly (ramping from `margin` to `full`),
+while below-target penalties are unchanged.
+
+### Creating an outdoor temperature sensor from a weather entity
+If you only have a `weather.*` entity, create a template sensor:
+
+```yaml
+template:
+  - sensor:
+      - name: "Outdoor Temperature"
+        unit_of_measurement: "C"
+        state: "{{ state_attr('weather.home', 'temperature') }}"
+```
+
+Use this sensor as the outdoor temperature entity, and use the `weather.home`
+entity for forecasts.
+
+## Learning (thermal model)
+Heat Pump Pilot learns two coefficients:
+- **heat_loss_coeff**: how fast the home leaks heat to the outdoors.
+- **heat_gain_coeff**: how much heating raises indoor temperature.
+
+Learning requires a "heat on" signal:
+- **Preferred**: heating supply/flow temperature sensor with threshold, hysteresis,
+  and debounce. The signal is only used when the supply temperature is clearly
+  on/off (outside the on/off margins).
+- **Fallback (controlling mode)**: assume the last applied MPC decision is the
+  heat signal.
+- **Fallback (monitor-only mode)**: use controlled entity state if it clearly
+  indicates heating (switch on or climate hvac_action == heating).
+
+If no reliable heat signal exists, the estimator only tracks indoor temperature
+and does *not* update the coefficients.
+
+### EKF model (default)
+The EKF state is `[indoor_temp, heat_loss_coeff, heat_gain_coeff]`.
+At each step:
+1. Predict the next temperature using the current coefficients.
+2. Compute the innovation from the measured temperature.
+3. Update the coefficients and covariance, with process/measurement noise.
+4. Clamp coefficients to safe ranges.
+
+### RLS model
+The RLS model estimates `[heat_gain_coeff, heat_loss_coeff]` from the change in
+temperature:
+- Uses a forgetting factor (0.90 to 1.00, default 0.99).
+- Updates on each sample using `dT = measured - last_temp`.
+- Decouples cross-covariance when heating is off to avoid gain drift.
+- Clamps coefficients to safe ranges.
+
+### Learning state
+Learning state uses a rolling 6-hour window of model history:
+- If the relative change in loss and gain stays under 5%, the model is **stable**.
+- Otherwise, it is **learning**.
+- If no heat signal is available, learning is **disabled**.
+
+## Price baseline and classification
+Two baselines are used:
+- **MPC baseline**: median of `price_forecast + price_history`.
+- **History baseline (24h)**: median of the last 24h of stored price history
+  (requires at least 16 samples).
+
+Classification uses `ratio = current_price / baseline` with labels:
+- `< 0.75` -> `very_low`
+- `< 0.90` -> `low`
+- `< 1.10` -> `normal`
+- `< 1.30` -> `high`
+- `< 1.60` -> `very_high`
+- `>= 1.60` -> `extreme`
+
+## Performance metrics
+Performance is computed over a configurable window (6/12/24/48/72/96 hours):
+- **Comfort score**: percent of samples within comfort tolerance.
+- **Price score**: how often heating occurs during low prices
+  (based on average price while heating vs min/max prices).
+- **Prediction accuracy**: MAE/RMSE/bias from MPC temperature predictions.
+
+These metrics are persisted and survive restarts.
+
+## Persistence and restart behavior
+The integration stores its state in `.storage`:
+- `heat_pump_pilot_<entry_id>_thermal.json` (learning model + history)
+- `heat_pump_pilot_<entry_id>_prices.json` (price history)
+- `heat_pump_pilot_<entry_id>_performance.json` (performance samples)
+
+This means learning, price baselines, and performance scores survive restarts.
+
+## Sensors and diagnostics
+Key diagnostic sensors:
+- Heat Pump Pilot Decision: last MPC action plus forecast/plan details, including `overshoot_warm_bias_multiplier`.
+- Heat Pump Pilot Health: overall health with reasons (missing sensors, stale control, etc).
+- Heat Pump Pilot Control State: whether the integration is controlling or monitoring.
+- Heat Pump Pilot Learning State: learning vs stable, with change ratios and window stats.
+- Heat Pump Pilot Price State: current price classification and baseline details.
+- Heat Pump Pilot Virtual Outdoor: the current virtual outdoor temperature sent to the pump.
+- Heat Pump Pilot Comfort Score: percent of samples within comfort tolerance.
+- Heat Pump Pilot Price Score: how well heating aligns with low prices.
+- Heat Pump Pilot Prediction Accuracy: MAE plus RMSE/bias for predicted indoor temperature.
+- Heat Pump Pilot Heating Detected (binary): debounced heating detection from supply sensor.
+
+## Tests
+Tests live under `tests/`:
+- `test_forecast_utils.py`
+- `test_learning_utils.py`
+- `test_mpc_controller.py`
+- `test_notification_utils.py`
+- `test_performance_utils.py`
+- `test_thermal_model.py`
+- `test_virtual_outdoor_utils.py`
+
+Run with:
+```bash
+pytest
+```
+
+## Adding another learning model
+To add a new learning model:
+1. Implement a new estimator in `thermal_model.py` with `step()`,
+   `observe_temperature()`, `export_state()`, and `restore()`.
+2. Add a new `LEARNING_MODEL_*` constant and config option.
+3. Update `_build_thermal_model()` in `climate.py` to instantiate it.
+4. Ensure persistence includes a `model_type` field and add tests.
+5. Update the config flow and strings for the new option.
+
+## Notes and limitations
+- In monitor-only mode without a reliable heat signal, learning is disabled.
+- Heating detection via supply/flow sensor improves learning quality and speed.
+- Weather forecast data is optional but improves prediction accuracy; the weather entity itself
+  is still required in the config flow.

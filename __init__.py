@@ -1,4 +1,4 @@
-"""Setup for the MPC Heat Pump Controller integration."""
+"""Setup for the Heat Pump Pilot integration."""
 
 from __future__ import annotations
 
@@ -60,13 +60,16 @@ except ModuleNotFoundError:  # pragma: no cover - allows unit tests without HA i
         """Fallback dispatcher shim for running tests outside HA."""
         return None
 
-from .const import DOMAIN, SIGNAL_OPTIONS_UPDATED
+try:
+    from .const import DOMAIN, SIGNAL_OPTIONS_UPDATED
+except ImportError:  # pragma: no cover - allows direct test imports
+    from const import DOMAIN, SIGNAL_OPTIONS_UPDATED
 
 PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up MPC Heat Pump Controller from a config entry."""
+    """Set up Heat Pump Pilot from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {}
 

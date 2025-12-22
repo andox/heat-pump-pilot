@@ -2,7 +2,7 @@
   "config": {
     "step": {
       "user": {
-        "title": "MPC Heat Pump Controller",
+        "title": "Heat Pump Pilot",
         "description": "Configure the MPC-based thermostat.",
         "data": {
           "indoor_temp_entity": "Indoor temperature sensor",
@@ -12,7 +12,9 @@
           "controlled_entity": "Entity to control (optional). Supports climate, switch, number, and some custom domains.",
           "monitor_only": "Monitor only (do not send control commands)",
           "target_temperature": "Target indoor temperature",
-          "price_comfort_weight": "Price vs comfort weight"
+          "price_comfort_weight": "Price vs comfort weight",
+          "learning_model": "Learning model",
+          "rls_forgetting_factor": "RLS forgetting factor"
         }
       }
     }
@@ -20,7 +22,7 @@
   "options": {
     "step": {
       "init": {
-        "title": "MPC Heat Pump Options",
+        "title": "Heat Pump Pilot Options",
         "description": "Tune the predictive controller behaviour.",
         "data": {
           "target_temperature": "Target indoor temperature",
@@ -28,15 +30,23 @@
           "control_interval_minutes": "Control interval (minutes)",
           "prediction_horizon_hours": "Prediction horizon (hours)",
           "comfort_temperature_tolerance": "Comfort tolerance (°C)",
+          "performance_window_hours": "Performance window (hours)",
           "monitor_only": "Monitor only (do not send control commands)",
           "virtual_outdoor_heat_offset": "Virtual outdoor offset when heating (°C)",
+          "overshoot_warm_bias_enabled": "Enable overshoot warm-bias",
+          "overshoot_warm_bias_margin": "Overshoot warm-bias margin (°C)",
+          "overshoot_warm_bias_full": "Overshoot warm-bias full effect (°C)",
           "heat_loss_coefficient": "Heat loss coefficient (house inertia)",
           "thermal_response_seed": "Initial thermal response (0 = light, 1 = heavy)",
+          "learning_model": "Learning model",
+          "rls_forgetting_factor": "RLS forgetting factor",
           "heating_supply_temp_entity": "Heating supply/flow temperature sensor (optional)",
           "heating_detection_enabled": "Enable heating detection from supply/flow temperature",
           "heating_supply_temp_threshold": "Supply/flow temperature threshold for heating-on (°C)",
           "heating_supply_temp_hysteresis": "Heating detection hysteresis (°C)",
           "heating_supply_temp_debounce_seconds": "Heating detection debounce time (seconds)",
+          "learning_supply_temp_on_margin": "Learning: on margin above threshold (°C)",
+          "learning_supply_temp_off_margin": "Learning: off margin below threshold (°C)",
           "initial_indoor_temp": "Initial indoor temperature seed (optional)",
           "initial_heat_loss_override": "Initial heat loss override (optional)",
           "initial_heat_gain_coefficient": "Initial heat gain override (optional)"

@@ -47,6 +47,9 @@ class MpcController:
         time_step_hours: float = TIME_STEP_HOURS,
         heat_loss_coeff: float = HEAT_LOSS_COEFF,
         heat_gain_coeff: float = HEAT_GAIN_COEFF,
+        overshoot_warm_bias_enabled: bool = False,
+        overshoot_warm_bias_margin: float = 0.3,
+        overshoot_warm_bias_full: float = 1.5,
     ) -> None:
         self.target_temperature = target_temperature
         self.price_comfort_weight = price_comfort_weight
@@ -55,6 +58,9 @@ class MpcController:
         self.time_step_hours = time_step_hours
         self.heat_loss_coeff = heat_loss_coeff
         self.heat_gain_coeff = heat_gain_coeff
+        self.overshoot_warm_bias_enabled = overshoot_warm_bias_enabled
+        self.overshoot_warm_bias_margin = overshoot_warm_bias_margin
+        self.overshoot_warm_bias_full = overshoot_warm_bias_full
         self._temp_resolution = TEMP_RESOLUTION
 
     def update_settings(
@@ -66,6 +72,9 @@ class MpcController:
         prediction_horizon_hours: int | None = None,
         heat_loss_coeff: float | None = None,
         heat_gain_coeff: float | None = None,
+        overshoot_warm_bias_enabled: bool | None = None,
+        overshoot_warm_bias_margin: float | None = None,
+        overshoot_warm_bias_full: float | None = None,
     ) -> None:
         """Update controller parameters."""
         if target_temperature is not None:
@@ -80,6 +89,12 @@ class MpcController:
             self.heat_loss_coeff = heat_loss_coeff
         if heat_gain_coeff is not None:
             self.heat_gain_coeff = heat_gain_coeff
+        if overshoot_warm_bias_enabled is not None:
+            self.overshoot_warm_bias_enabled = overshoot_warm_bias_enabled
+        if overshoot_warm_bias_margin is not None:
+            self.overshoot_warm_bias_margin = overshoot_warm_bias_margin
+        if overshoot_warm_bias_full is not None:
+            self.overshoot_warm_bias_full = overshoot_warm_bias_full
 
     def suggest_control(
         self,
@@ -155,7 +170,7 @@ class MpcController:
 
             for action in (False, True):
                 heat_power = 1.0 if action else 0.0
-                comfort_penalty = max(0.0, abs(temp - self.target_temperature) - self.comfort_temperature_tolerance)
+                comfort_penalty = self._comfort_penalty(temp)
                 # Penalize heating relative to the (median) baseline price.
                 # Using max_price here would squash the relative differences we care about.
                 baseline_denom = max(price_baseline, 1e-6)
@@ -178,6 +193,23 @@ class MpcController:
 
         cost, path = solve(0, start_bucket, -1)
         return list(path), cost
+
+    def _comfort_penalty(self, temp: float) -> float:
+        """Compute comfort penalty with optional above-target bias."""
+        delta = temp - self.target_temperature
+        penalty = max(0.0, abs(delta) - self.comfort_temperature_tolerance)
+        if penalty <= 0.0 or not self.overshoot_warm_bias_enabled:
+            return penalty
+        if delta <= 0.0:
+            return penalty
+        margin = max(0.0, float(self.overshoot_warm_bias_margin))
+        full = float(self.overshoot_warm_bias_full)
+        if full <= margin:
+            full = margin + 1.0
+        if delta <= margin:
+            return penalty
+        fraction = min(1.0, max(0.0, (delta - margin) / max(0.001, full - margin)))
+        return penalty * (1.0 + fraction)
 
     def _simulate_sequence(self, indoor_temp: float, outdoor: Sequence[float], sequence: Sequence[bool]) -> list[float]:
         """Simulate temperatures for a chosen sequence.

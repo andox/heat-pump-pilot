@@ -16,7 +16,8 @@ if str(COMPONENT_ROOT) not in sys.path:
 
 from mpc_controller import MpcController  # noqa: E402
 from price_history import PriceHistoryStorage  # noqa: E402
-from thermal_model import ThermalModelEstimator, ThermalModelStorage  # noqa: E402
+from performance_history import PerformanceHistoryStorage  # noqa: E402
+from thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator, ThermalModelStorage  # noqa: E402
 
 
 def test_thermal_model_learns_gain_from_heating() -> None:
@@ -54,6 +55,59 @@ def test_thermal_model_persistence_round_trip() -> None:
     assert pytest.approx(restored.indoor_temp, rel=0.1) == estimator.indoor_temp
 
 
+def test_rls_model_learns_gain_from_heating() -> None:
+    """RLS should adjust gain coefficient from heating updates."""
+    estimator = ThermalModelRlsEstimator(
+        seed=0.8, initial_heat_loss=0.05, initial_heat_gain=0.2, initial_temp=20.0, forgetting_factor=0.98
+    )
+    initial_gain = estimator.heat_gain_coeff
+    temp = 20.0
+    outdoor = 0.0
+    for _ in range(6):
+        temp += 0.3
+        estimator.step(temp, outdoor, heat_on=True, dt_hours=0.25)
+    assert estimator.heat_gain_coeff > initial_gain
+    assert estimator.heat_loss_coeff > 0
+
+
+def test_rls_persistence_round_trip() -> None:
+    """Saved RLS state should restore cleanly."""
+    estimator = ThermalModelRlsEstimator(
+        seed=0.2, initial_heat_loss=0.08, initial_heat_gain=0.3, initial_temp=19.0, forgetting_factor=0.97
+    )
+    estimator.step(19.6, outdoor_temp=5.0, heat_on=True, dt_hours=0.5)
+    state = estimator.export_state()
+
+    with TemporaryDirectory() as tmp:
+        storage = ThermalModelStorage(Path(tmp) / "state.json")
+        storage.save(state)
+        loaded = storage.load()
+
+    restored = ThermalModelRlsEstimator(seed=0.5, forgetting_factor=0.99)
+    assert loaded is not None
+    assert restored.restore(loaded)
+    assert pytest.approx(restored.heat_loss_coeff, rel=0.1) == estimator.heat_loss_coeff
+    assert pytest.approx(restored.heat_gain_coeff, rel=0.1) == estimator.heat_gain_coeff
+    assert pytest.approx(restored.indoor_temp, rel=0.1) == estimator.indoor_temp
+
+
+def test_thermal_model_storage_accepts_history_payload() -> None:
+    """Storage should persist payloads that include learning history."""
+    payload = {
+        "version": 2,
+        "model_type": "ekf",
+        "state": [21.0, 0.05, 0.4],
+        "covariance": [[0.5, 0.0, 0.0], [0.0, 0.01, 0.0], [0.0, 0.0, 0.05]],
+        "history": [["2025-12-13T12:15:00+00:00", 0.05, 0.4]],
+    }
+    with TemporaryDirectory() as tmp:
+        storage = ThermalModelStorage(Path(tmp) / "state.json")
+        storage.save(payload)
+        loaded = storage.load()
+
+    assert loaded == payload
+
+
 def test_price_history_persistence_round_trip() -> None:
     """Saved price history should restore cleanly."""
     payload = {
@@ -64,6 +118,29 @@ def test_price_history_persistence_round_trip() -> None:
     }
     with TemporaryDirectory() as tmp:
         storage = PriceHistoryStorage(Path(tmp) / "prices.json")
+        storage.save(payload)
+        loaded = storage.load()
+
+    assert loaded == payload
+
+
+def test_performance_history_persistence_round_trip() -> None:
+    """Saved performance history should restore cleanly."""
+    payload = {
+        "version": 1,
+        "history": [
+            {
+                "time": "2025-12-13T12:15:00+00:00",
+                "indoor_temp": 21.0,
+                "target_temp": 20.0,
+                "heating_detected": True,
+                "price": 0.2,
+                "prediction_error": -0.1,
+            }
+        ],
+    }
+    with TemporaryDirectory() as tmp:
+        storage = PerformanceHistoryStorage(Path(tmp) / "performance.json")
         storage.save(payload)
         loaded = storage.load()
 

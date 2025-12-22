@@ -1,8 +1,8 @@
-"""Constants for the MPC Heat Pump Controller integration."""
+"""Constants for the Heat Pump Pilot integration."""
 
 from __future__ import annotations
 
-DOMAIN = "mpc_heat_pump"
+DOMAIN = "heat_pump_pilot"
 
 CONF_INDOOR_TEMP = "indoor_temp_entity"
 CONF_OUTDOOR_TEMP = "outdoor_temp_entity"
@@ -27,6 +27,17 @@ CONF_HEATING_SUPPLY_TEMP_THRESHOLD = "heating_supply_temp_threshold"
 CONF_HEATING_DETECTION_ENABLED = "heating_detection_enabled"
 CONF_HEATING_SUPPLY_TEMP_HYSTERESIS = "heating_supply_temp_hysteresis"
 CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS = "heating_supply_temp_debounce_seconds"
+CONF_OVERSHOOT_WARM_BIAS_ENABLED = "overshoot_warm_bias_enabled"
+CONF_OVERSHOOT_WARM_BIAS_MARGIN = "overshoot_warm_bias_margin"
+CONF_OVERSHOOT_WARM_BIAS_FULL = "overshoot_warm_bias_full"
+CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN = "learning_supply_temp_on_margin"
+CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN = "learning_supply_temp_off_margin"
+CONF_LEARNING_MODEL = "learning_model"
+CONF_RLS_FORGETTING_FACTOR = "rls_forgetting_factor"
+CONF_PERFORMANCE_WINDOW_HOURS = "performance_window_hours"
+
+LEARNING_MODEL_EKF = "ekf"
+LEARNING_MODEL_RLS = "rls"
 
 DEFAULT_TARGET_TEMPERATURE = 21.0
 DEFAULT_PRICE_COMFORT_WEIGHT = 0.5
@@ -41,6 +52,16 @@ DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD = 30.0
 DEFAULT_HEATING_DETECTION_ENABLED = True
 DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS = 1.0
 DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS = 60
+DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED = True
+DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN = 0.3
+DEFAULT_OVERSHOOT_WARM_BIAS_FULL = 1.5
+DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN = 1.0
+DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN = 1.0
+DEFAULT_LEARNING_MODEL = LEARNING_MODEL_EKF
+DEFAULT_RLS_FORGETTING_FACTOR = 0.99
+DEFAULT_PERFORMANCE_WINDOW_HOURS = 24
 
-SIGNAL_OPTIONS_UPDATED = "mpc_heat_pump_options_updated"
-SIGNAL_DECISION_UPDATED = "mpc_heat_pump_decision_updated"
+PERFORMANCE_WINDOW_OPTIONS = (6, 12, 24, 48, 72, 96)
+
+SIGNAL_OPTIONS_UPDATED = "heat_pump_pilot_options_updated"
+SIGNAL_DECISION_UPDATED = "heat_pump_pilot_decision_updated"

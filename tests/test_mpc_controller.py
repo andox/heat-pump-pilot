@@ -217,3 +217,34 @@ def test_price_comfort_weight_changes_optimal_first_action() -> None:
     )
     action_price, _ = price_first.suggest_control(indoor_temp, outdoor_forecast, price_forecast)
     assert action_price is False
+
+
+def test_overshoot_bias_increases_above_target_penalty() -> None:
+    """Above-target penalty should increase when overshoot warm bias is enabled."""
+    with_bias = MpcController(
+        target_temperature=20.0,
+        price_comfort_weight=0.5,
+        comfort_temperature_tolerance=0.0,
+        prediction_horizon_hours=1,
+        time_step_hours=1.0,
+        heat_loss_coeff=0.0,
+        heat_gain_coeff=1.0,
+        overshoot_warm_bias_enabled=True,
+        overshoot_warm_bias_margin=0.5,
+        overshoot_warm_bias_full=1.5,
+    )
+    without_bias = MpcController(
+        target_temperature=20.0,
+        price_comfort_weight=0.5,
+        comfort_temperature_tolerance=0.0,
+        prediction_horizon_hours=1,
+        time_step_hours=1.0,
+        heat_loss_coeff=0.0,
+        heat_gain_coeff=1.0,
+        overshoot_warm_bias_enabled=False,
+        overshoot_warm_bias_margin=0.5,
+        overshoot_warm_bias_full=1.5,
+    )
+
+    assert with_bias._comfort_penalty(19.0) == without_bias._comfort_penalty(19.0)
+    assert with_bias._comfort_penalty(21.0) > without_bias._comfort_penalty(21.0)

@@ -1,8 +1,4 @@
-"""Price history persistence helpers for heat_pump_pilot.
-
-This module is intentionally free of Home Assistant imports so it can be
-unit-tested in isolation.
-"""
+"""Performance history persistence helpers for heat_pump_pilot."""
 
 from __future__ import annotations
 
@@ -11,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 
-class PriceHistoryStorage:
-    """Simple JSON file persistence for the price history."""
+class PerformanceHistoryStorage:
+    """Simple JSON file persistence for performance samples."""
 
     def __init__(self, path: str) -> None:
         self._path = Path(path)

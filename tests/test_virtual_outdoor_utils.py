@@ -53,3 +53,21 @@ def test_planned_virtual_outdoor_respects_max_virtual_outdoor() -> None:
     )
     assert planned == [25.0]
 
+
+def test_planned_virtual_outdoor_overshoot_warm_bias() -> None:
+    planned = compute_planned_virtual_outdoor_temperatures(
+        [False],
+        outdoor_forecast=[6.0],
+        price_forecast=[1.0],
+        predicted_temperatures=[21.0],
+        base_outdoor_fallback=6.0,
+        virtual_heat_offset=10.0,
+        price_comfort_weight=0.0,
+        price_baseline=1.0,
+        target_temperature=20.0,
+        overshoot_warm_bias_enabled=True,
+        overshoot_warm_bias_margin=0.5,
+        overshoot_warm_bias_full=1.5,
+    )
+    # overshoot=1.0, margin=0.5, full=1.5 => fraction=0.5 => boost=5
+    assert planned == [11.0]

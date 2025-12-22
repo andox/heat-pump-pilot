@@ -23,6 +23,9 @@ STATE_INDEX_TEMP = 0
 STATE_INDEX_LOSS = 1
 STATE_INDEX_GAIN = 2
 
+RLS_INDEX_GAIN = 0
+RLS_INDEX_LOSS = 1
+
 
 @dataclass
 class ThermalModelState:
@@ -42,6 +45,14 @@ def _lerp(minimum: float, maximum: float, fraction: float) -> float:
     return minimum + (maximum - minimum) * fraction
 
 
+def _defaults_from_seed(seed: float) -> tuple[float, float]:
+    """Map a 0-1 seed to initial heat loss/gain values."""
+    fraction = _clamp(seed, 0.0, 1.0)
+    loss = _lerp(MAX_HEAT_LOSS, MIN_HEAT_LOSS, fraction)
+    gain = _lerp(MAX_HEAT_GAIN, MIN_HEAT_GAIN, fraction)
+    return loss, gain
+
+
 class ThermalModelEstimator:
     """Tiny EKF that learns heat loss and gain coefficients."""
 
@@ -53,7 +64,7 @@ class ThermalModelEstimator:
         initial_heat_gain: float | None = None,
         initial_temp: float | None = None,
     ) -> None:
-        loss_seed, gain_seed = self._defaults_from_seed(seed)
+        loss_seed, gain_seed = _defaults_from_seed(seed)
         loss = initial_heat_loss if initial_heat_loss is not None else loss_seed
         gain = initial_heat_gain if initial_heat_gain is not None else gain_seed
         loss = _clamp(loss, MIN_HEAT_LOSS, MAX_HEAT_LOSS)
@@ -61,14 +72,6 @@ class ThermalModelEstimator:
         start_temp = initial_temp if initial_temp is not None else 20.0
         self._state = [float(start_temp), loss, gain]
         self._covariance = self._initial_covariance()
-
-    @staticmethod
-    def _defaults_from_seed(seed: float) -> tuple[float, float]:
-        """Map a 0-1 seed to initial heat loss/gain values."""
-        fraction = _clamp(seed, 0.0, 1.0)
-        loss = _lerp(MAX_HEAT_LOSS, MIN_HEAT_LOSS, fraction)
-        gain = _lerp(MAX_HEAT_GAIN, MIN_HEAT_GAIN, fraction)
-        return loss, gain
 
     @property
     def heat_loss_coeff(self) -> float:
@@ -94,7 +97,7 @@ class ThermalModelEstimator:
         initial_temp: float | None = None,
     ) -> None:
         """Reset the model using a new seed and optional overrides."""
-        loss_seed, gain_seed = self._defaults_from_seed(seed)
+        loss_seed, gain_seed = _defaults_from_seed(seed)
         loss = initial_heat_loss if initial_heat_loss is not None else loss_seed
         gain = initial_heat_gain if initial_heat_gain is not None else gain_seed
         loss = _clamp(loss, MIN_HEAT_LOSS, MAX_HEAT_LOSS)
@@ -103,11 +106,15 @@ class ThermalModelEstimator:
         self._state = [float(start_temp), loss, gain]
         self._covariance = self._initial_covariance()
 
-    def step(self, measured_temp: float, outdoor_temp: float, heat_on: bool, dt_hours: float) -> float:
+    def step(self, measured_temp: float, outdoor_temp: float, heat_on: float | bool, dt_hours: float) -> float:
         """Run one EKF step given a new measurement."""
         if dt_hours <= 0:
             dt_hours = 1 / 60  # Default to 1 minute if we somehow get zero.
-        u = 1.0 if heat_on else 0.0
+        try:
+            u = float(heat_on)
+        except (TypeError, ValueError):
+            u = 1.0 if heat_on else 0.0
+        u = _clamp(u, 0.0, 1.0)
         temp, loss, gain = self._state
 
         # Predict.
@@ -162,13 +169,20 @@ class ThermalModelEstimator:
         )
         return self._state[STATE_INDEX_TEMP]
 
-    def export_state(self) -> ThermalModelState:
+    def export_state(self) -> dict[str, Any]:
         """Return a serializable snapshot of the model."""
-        return ThermalModelState(state=list(self._state), covariance=[list(row) for row in self._covariance])
+        return {
+            "model_type": "ekf",
+            "state": list(self._state),
+            "covariance": [list(row) for row in self._covariance],
+        }
 
     def restore(self, payload: dict[str, Any]) -> bool:
         """Load state from a persisted snapshot."""
         if not payload:
+            return False
+        model_type = payload.get("model_type")
+        if model_type is not None and model_type != "ekf":
             return False
         state = payload.get("state")
         covariance = payload.get("covariance")
@@ -234,6 +248,172 @@ class ThermalModelEstimator:
         return covariance
 
 
+class ThermalModelRlsEstimator:
+    """RLS estimator that learns heat loss and gain coefficients."""
+
+    def __init__(
+        self,
+        *,
+        seed: float = 0.5,
+        initial_heat_loss: float | None = None,
+        initial_heat_gain: float | None = None,
+        initial_temp: float | None = None,
+        forgetting_factor: float = 0.99,
+    ) -> None:
+        loss_seed, gain_seed = _defaults_from_seed(seed)
+        loss = initial_heat_loss if initial_heat_loss is not None else loss_seed
+        gain = initial_heat_gain if initial_heat_gain is not None else gain_seed
+        loss = _clamp(loss, MIN_HEAT_LOSS, MAX_HEAT_LOSS)
+        gain = _clamp(gain, MIN_HEAT_GAIN, MAX_HEAT_GAIN)
+        start_temp = initial_temp if initial_temp is not None else 20.0
+        self._theta = [float(gain), float(loss)]
+        self._covariance = self._initial_covariance()
+        self._last_temp = float(start_temp)
+        self._forgetting_factor = _clamp(forgetting_factor, 0.9, 1.0)
+
+    @property
+    def heat_loss_coeff(self) -> float:
+        """Return the current heat loss coefficient."""
+        return self._theta[RLS_INDEX_LOSS]
+
+    @property
+    def heat_gain_coeff(self) -> float:
+        """Return the current heating gain coefficient."""
+        return self._theta[RLS_INDEX_GAIN]
+
+    @property
+    def indoor_temp(self) -> float:
+        """Return the last observed indoor temperature."""
+        return self._last_temp
+
+    def reseed(
+        self,
+        *,
+        seed: float,
+        initial_heat_loss: float | None = None,
+        initial_heat_gain: float | None = None,
+        initial_temp: float | None = None,
+    ) -> None:
+        """Reset the model using a new seed and optional overrides."""
+        loss_seed, gain_seed = _defaults_from_seed(seed)
+        loss = initial_heat_loss if initial_heat_loss is not None else loss_seed
+        gain = initial_heat_gain if initial_heat_gain is not None else gain_seed
+        loss = _clamp(loss, MIN_HEAT_LOSS, MAX_HEAT_LOSS)
+        gain = _clamp(gain, MIN_HEAT_GAIN, MAX_HEAT_GAIN)
+        start_temp = self._last_temp if initial_temp is None else initial_temp
+        self._theta = [float(gain), float(loss)]
+        self._covariance = self._initial_covariance()
+        self._last_temp = float(start_temp)
+
+    def step(self, measured_temp: float, outdoor_temp: float, heat_on: float | bool, dt_hours: float) -> float:
+        """Run one RLS update given a new measurement."""
+        if dt_hours <= 0:
+            dt_hours = 1 / 60
+        try:
+            u = float(heat_on)
+        except (TypeError, ValueError):
+            u = 1.0 if heat_on else 0.0
+        u = _clamp(u, 0.0, 1.0)
+        last_temp = self._last_temp
+        dtemp = measured_temp - last_temp
+        phi0 = dt_hours * u
+        phi1 = dt_hours * (outdoor_temp - last_temp)
+
+        p00, p01 = self._covariance[0]
+        p10, p11 = self._covariance[1]
+        if u <= 0.0:
+            # Avoid gain drift when heating is off by decoupling cross-covariance terms.
+            p01 = 0.0
+            p10 = 0.0
+        p_phi0 = p00 * phi0 + p01 * phi1
+        p_phi1 = p10 * phi0 + p11 * phi1
+        denom = self._forgetting_factor + (phi0 * p_phi0 + phi1 * p_phi1)
+        if denom <= 0:
+            denom = self._forgetting_factor
+        k0 = p_phi0 / denom
+        k1 = p_phi1 / denom
+        prediction = phi0 * self._theta[0] + phi1 * self._theta[1]
+        innovation = dtemp - prediction
+        self._theta[0] = _clamp(self._theta[0] + k0 * innovation, MIN_HEAT_GAIN, MAX_HEAT_GAIN)
+        self._theta[1] = _clamp(self._theta[1] + k1 * innovation, MIN_HEAT_LOSS, MAX_HEAT_LOSS)
+
+        r0 = phi0 * p00 + phi1 * p10
+        r1 = phi0 * p01 + phi1 * p11
+        p00_new = (p00 - k0 * r0) / self._forgetting_factor
+        p01_new = (p01 - k0 * r1) / self._forgetting_factor
+        p10_new = (p10 - k1 * r0) / self._forgetting_factor
+        p11_new = (p11 - k1 * r1) / self._forgetting_factor
+        self._covariance = self._enforce_covariance([[p00_new, p01_new], [p10_new, p11_new]])
+
+        self._last_temp = float(measured_temp)
+        return self._last_temp
+
+    def observe_temperature(self, measured_temp: float) -> float:
+        """Update only the temperature estimate from a measurement."""
+        try:
+            self._last_temp = float(measured_temp)
+        except (TypeError, ValueError):
+            return self._last_temp
+        return self._last_temp
+
+    def export_state(self) -> dict[str, Any]:
+        """Return a serializable snapshot of the model."""
+        return {
+            "model_type": "rls",
+            "theta": list(self._theta),
+            "covariance": [list(row) for row in self._covariance],
+            "last_temp": self._last_temp,
+        }
+
+    def restore(self, payload: dict[str, Any]) -> bool:
+        """Load state from a persisted snapshot."""
+        if not payload:
+            return False
+        if payload.get("model_type") != "rls":
+            return False
+        theta = payload.get("theta")
+        covariance = payload.get("covariance")
+        last_temp = payload.get("last_temp")
+        if (
+            not isinstance(theta, list)
+            or len(theta) != 2
+            or not isinstance(covariance, list)
+            or len(covariance) != 2
+            or any(not isinstance(row, list) or len(row) != 2 for row in covariance)
+        ):
+            return False
+        try:
+            theta = [float(v) for v in theta]
+            covariance = [[float(v) for v in row] for row in covariance]
+            last_temp = float(last_temp)
+        except (TypeError, ValueError):
+            return False
+        theta[RLS_INDEX_GAIN] = _clamp(theta[RLS_INDEX_GAIN], MIN_HEAT_GAIN, MAX_HEAT_GAIN)
+        theta[RLS_INDEX_LOSS] = _clamp(theta[RLS_INDEX_LOSS], MIN_HEAT_LOSS, MAX_HEAT_LOSS)
+        self._theta = theta
+        self._covariance = self._enforce_covariance(covariance)
+        self._last_temp = last_temp
+        return True
+
+    @staticmethod
+    def _initial_covariance() -> list[list[float]]:
+        """Reasonable starting covariance."""
+        return [
+            [0.25, 0.0],
+            [0.0, 0.25],
+        ]
+
+    @staticmethod
+    def _enforce_covariance(covariance: list[list[float]]) -> list[list[float]]:
+        """Keep covariance symmetric and positive-ish on the diagonal."""
+        avg = (covariance[0][1] + covariance[1][0]) / 2
+        covariance[0][1] = covariance[1][0] = avg
+        for idx in range(2):
+            if covariance[idx][idx] < 1e-6:
+                covariance[idx][idx] = 1e-6
+        return covariance
+
+
 class ThermalModelStorage:
     """Simple JSON file persistence for the estimator."""
 
@@ -250,11 +430,16 @@ class ThermalModelStorage:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def save(self, payload: ThermalModelState) -> None:
+    def save(self, payload: ThermalModelState | dict[str, Any]) -> None:
         """Persist state atomically."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        data = {"state": payload.state, "covariance": payload.covariance}
+        if isinstance(payload, ThermalModelState):
+            data = {"version": 1, "state": payload.state, "covariance": payload.covariance}
+        elif isinstance(payload, dict):
+            data = dict(payload)
+        else:
+            return
         with temp_path.open("w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=True)
         temp_path.replace(self._path)

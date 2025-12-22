@@ -1,4 +1,4 @@
-"""Config flow for the MPC Heat Pump Controller integration."""
+"""Config flow for the Heat Pump Pilot integration."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ from .const import (
     CONF_CONTROL_INTERVAL_MINUTES,
     CONF_CONTROLLED_ENTITY,
     CONF_HEATING_DETECTION_ENABLED,
+    CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
+    CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN,
+    CONF_LEARNING_MODEL,
     CONF_INDOOR_TEMP,
     CONF_MONITOR_ONLY,
     CONF_INITIAL_HEAT_GAIN,
@@ -24,6 +27,9 @@ from .const import (
     CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
     CONF_HEATING_SUPPLY_TEMP_THRESHOLD,
     CONF_OUTDOOR_TEMP,
+    CONF_OVERSHOOT_WARM_BIAS_ENABLED,
+    CONF_OVERSHOOT_WARM_BIAS_FULL,
+    CONF_OVERSHOOT_WARM_BIAS_MARGIN,
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
@@ -32,11 +38,18 @@ from .const import (
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
     CONF_WEATHER_FORECAST_ENTITY,
     CONF_HEAT_LOSS_COEFFICIENT,
+    CONF_PERFORMANCE_WINDOW_HOURS,
+    CONF_RLS_FORGETTING_FACTOR,
     DEFAULT_MONITOR_ONLY,
     DEFAULT_COMFORT_TEMPERATURE_TOLERANCE,
     DEFAULT_CONTROL_INTERVAL_MINUTES,
+    DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
+    DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN,
+    DEFAULT_LEARNING_MODEL,
+    DEFAULT_PERFORMANCE_WINDOW_HOURS,
     DEFAULT_PREDICTION_HORIZON_HOURS,
     DEFAULT_PRICE_COMFORT_WEIGHT,
+    DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
     DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
@@ -45,12 +58,18 @@ from .const import (
     DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS,
     DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
     DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD,
+    DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
+    DEFAULT_OVERSHOOT_WARM_BIAS_FULL,
+    DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN,
     DOMAIN,
+    LEARNING_MODEL_EKF,
+    LEARNING_MODEL_RLS,
+    PERFORMANCE_WINDOW_OPTIONS,
 )
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for the MPC Heat Pump Controller."""
+    """Handle a config flow for the Heat Pump Pilot."""
 
     VERSION = 1
 
@@ -75,13 +94,23 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_COMFORT_TEMPERATURE_TOLERANCE: DEFAULT_COMFORT_TEMPERATURE_TOLERANCE,
                 CONF_MONITOR_ONLY: user_input.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+                CONF_OVERSHOOT_WARM_BIAS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
+                CONF_OVERSHOOT_WARM_BIAS_MARGIN: DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN,
+                CONF_OVERSHOOT_WARM_BIAS_FULL: DEFAULT_OVERSHOOT_WARM_BIAS_FULL,
                 CONF_HEAT_LOSS_COEFFICIENT: DEFAULT_HEAT_LOSS_COEFFICIENT,
                 CONF_THERMAL_RESPONSE_SEED: DEFAULT_THERMAL_RESPONSE_SEED,
+                CONF_LEARNING_MODEL: user_input.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
+                CONF_RLS_FORGETTING_FACTOR: user_input.get(
+                    CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR
+                ),
+                CONF_PERFORMANCE_WINDOW_HOURS: DEFAULT_PERFORMANCE_WINDOW_HOURS,
                 CONF_HEATING_SUPPLY_TEMP_ENTITY: None,
                 CONF_HEATING_SUPPLY_TEMP_THRESHOLD: DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD,
                 CONF_HEATING_DETECTION_ENABLED: False,
                 CONF_HEATING_SUPPLY_TEMP_HYSTERESIS: DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS,
                 CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS: DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
+                CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN: DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN,
+                CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN: DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
                 CONF_INITIAL_INDOOR_TEMP: None,
                 CONF_INITIAL_HEAT_GAIN: None,
                 CONF_INITIAL_HEAT_LOSS_OVERRIDE: None,
@@ -93,7 +122,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_WEATHER_FORECAST_ENTITY: user_input[CONF_WEATHER_FORECAST_ENTITY],
                 CONF_CONTROLLED_ENTITY: controlled_entity,
             }
-            return self.async_create_entry(title="MPC Heat Pump Controller", data=data, options=options)
+            return self.async_create_entry(title="Heat Pump Pilot", data=data, options=options)
 
         data_schema = vol.Schema(
             {
@@ -135,6 +164,24 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         mode=selector.NumberSelectorMode.SLIDER,
                     )
                 ),
+                vol.Required(
+                    CONF_LEARNING_MODEL, default=DEFAULT_LEARNING_MODEL
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[LEARNING_MODEL_EKF, LEARNING_MODEL_RLS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_RLS_FORGETTING_FACTOR, default=DEFAULT_RLS_FORGETTING_FACTOR
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.90,
+                        max=1.00,
+                        step=0.01,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
             }
         )
 
@@ -148,7 +195,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options for the MPC Heat Pump Controller."""
+    """Handle options for the Heat Pump Pilot."""
 
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
@@ -182,8 +229,24 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_COMFORT_TEMPERATURE_TOLERANCE: user_input[CONF_COMFORT_TEMPERATURE_TOLERANCE],
                 CONF_MONITOR_ONLY: user_input[CONF_MONITOR_ONLY],
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: user_input[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET],
+                CONF_OVERSHOOT_WARM_BIAS_ENABLED: user_input.get(
+                    CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED
+                ),
+                CONF_OVERSHOOT_WARM_BIAS_MARGIN: user_input.get(
+                    CONF_OVERSHOOT_WARM_BIAS_MARGIN, DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN
+                ),
+                CONF_OVERSHOOT_WARM_BIAS_FULL: user_input.get(
+                    CONF_OVERSHOOT_WARM_BIAS_FULL, DEFAULT_OVERSHOOT_WARM_BIAS_FULL
+                ),
                 CONF_HEAT_LOSS_COEFFICIENT: user_input[CONF_HEAT_LOSS_COEFFICIENT],
                 CONF_THERMAL_RESPONSE_SEED: user_input[CONF_THERMAL_RESPONSE_SEED],
+                CONF_LEARNING_MODEL: user_input.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
+                CONF_RLS_FORGETTING_FACTOR: user_input.get(
+                    CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR
+                ),
+                CONF_PERFORMANCE_WINDOW_HOURS: user_input.get(
+                    CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS
+                ),
                 CONF_HEATING_SUPPLY_TEMP_ENTITY: heating_supply_entity,
                 CONF_HEATING_SUPPLY_TEMP_THRESHOLD: user_input.get(
                     CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD
@@ -194,6 +257,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS: user_input.get(
                     CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS, DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS
+                ),
+                CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN: user_input.get(
+                    CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN
+                ),
+                CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN: user_input.get(
+                    CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN
                 ),
                 CONF_INITIAL_INDOOR_TEMP: user_input.get(CONF_INITIAL_INDOOR_TEMP),
                 CONF_INITIAL_HEAT_GAIN: user_input.get(CONF_INITIAL_HEAT_GAIN),
@@ -300,6 +369,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     )
                 ),
                 vol.Required(
+                    CONF_PERFORMANCE_WINDOW_HOURS,
+                    default=str(options.get(CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS)),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[str(value) for value in PERFORMANCE_WINDOW_OPTIONS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
                     CONF_MONITOR_ONLY,
                     default=options.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
                 ): selector.BooleanSelector(),
@@ -313,6 +391,34 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         min=0,
                         max=15,
                         step=0.5,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_ENABLED,
+                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_MARGIN,
+                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_MARGIN, DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=3.0,
+                        step=0.1,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_FULL,
+                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_FULL, DEFAULT_OVERSHOOT_WARM_BIAS_FULL),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.2,
+                        max=5.0,
+                        step=0.1,
                         unit_of_measurement="°C",
                         mode=selector.NumberSelectorMode.BOX,
                     )
@@ -337,6 +443,26 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         max=1.0,
                         step=0.05,
                         mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Required(
+                    CONF_LEARNING_MODEL,
+                    default=options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[LEARNING_MODEL_EKF, LEARNING_MODEL_RLS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_RLS_FORGETTING_FACTOR,
+                    default=options.get(CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.90,
+                        max=1.00,
+                        step=0.01,
+                        mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
                 vol.Optional(
@@ -388,6 +514,30 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         max=600,
                         step=5,
                         unit_of_measurement="s",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
+                    CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN,
+                    default=options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=10.0,
+                        step=0.5,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
+                    CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
+                    default=options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=10.0,
+                        step=0.5,
+                        unit_of_measurement="°C",
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),

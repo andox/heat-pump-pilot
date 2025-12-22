@@ -13,6 +13,8 @@ try:  # pragma: no cover - exercised indirectly in Home Assistant
         CONF_INITIAL_HEAT_GAIN,
         CONF_INITIAL_HEAT_LOSS_OVERRIDE,
         CONF_INITIAL_INDOOR_TEMP,
+        CONF_LEARNING_MODEL,
+        CONF_RLS_FORGETTING_FACTOR,
         CONF_THERMAL_RESPONSE_SEED,
     )
 except ImportError:  # pragma: no cover - allows unit tests without package context
@@ -21,6 +23,8 @@ except ImportError:  # pragma: no cover - allows unit tests without package cont
         CONF_INITIAL_HEAT_GAIN,
         CONF_INITIAL_HEAT_LOSS_OVERRIDE,
         CONF_INITIAL_INDOOR_TEMP,
+        CONF_LEARNING_MODEL,
+        CONF_RLS_FORGETTING_FACTOR,
         CONF_THERMAL_RESPONSE_SEED,
     )
 
@@ -32,6 +36,8 @@ _THERMAL_RESEED_KEYS: tuple[str, ...] = (
     # Treat the base heat loss coefficient as a "reseed" signal; otherwise a user change
     # will be overwritten by the next EKF step.
     CONF_HEAT_LOSS_COEFFICIENT,
+    CONF_LEARNING_MODEL,
+    CONF_RLS_FORGETTING_FACTOR,
 )
 
 

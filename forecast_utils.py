@@ -1,4 +1,4 @@
-"""Forecast parsing utilities for mpc_heat_pump.
+"""Forecast parsing utilities for heat_pump_pilot.
 
 These helpers are intentionally free of Home Assistant imports so they can be
 unit-tested in isolation.
