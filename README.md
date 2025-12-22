@@ -202,6 +202,143 @@ Key diagnostic sensors:
 - Heat Pump Pilot Prediction Accuracy: MAE plus RMSE/bias for predicted indoor temperature.
 - Heat Pump Pilot Heating Detected (binary): debounced heating detection from supply sensor.
 
+## Dashboard card (example)
+This grid card is safe to paste into a Lovelace dashboard.
+
+Notes about entities:
+- From this integration: `climate.heat_pump_pilot`, `sensor.heat_pump_pilot_*`,
+  `binary_sensor.heat_pump_pilot_heating_detected`.
+- From your own setup: `sensor.ground_source_heat_pump` (supply/flow temperature). If you
+  don’t have one, remove that line from the Temperatures graph.
+
+```yaml
+square: false
+type: grid
+columns: 1
+cards:
+  - type: thermostat
+    entity: climate.heat_pump_pilot
+    name: Heat Pump Pilot
+    show_current_as_primary: true
+  - type: entities
+    title: Scores
+    entities:
+      - entity: sensor.heat_pump_pilot_comfort_score
+        name: Comfort Score
+        secondary_info: last-changed
+      - entity: sensor.heat_pump_pilot_price_score
+        name: Price Score
+        secondary_info: last-changed
+      - entity: sensor.heat_pump_pilot_prediction_accuracy
+        name: Prediction MAE
+        secondary_info: last-changed
+    show_header_toggle: false
+    state_color: false
+  - type: entities
+    title: Score Details
+    show_header_toggle: false
+    entities:
+      - type: attribute
+        entity: sensor.heat_pump_pilot_comfort_score
+        attribute: within_tolerance_pct
+        name: Comfort within tolerance (%)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_comfort_score
+        attribute: mean_abs_error
+        name: Comfort MAE (°C)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_comfort_score
+        attribute: max_abs_error
+        name: Comfort max error (°C)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_price_score
+        attribute: heating_ratio
+        name: Heating ratio
+      - type: attribute
+        entity: sensor.heat_pump_pilot_price_score
+        attribute: avg_price_when_heating
+        name: Avg price when heating
+      - type: attribute
+        entity: sensor.heat_pump_pilot_price_score
+        attribute: min_price
+        name: Min price
+      - type: attribute
+        entity: sensor.heat_pump_pilot_price_score
+        attribute: max_price
+        name: Max price
+      - type: attribute
+        entity: sensor.heat_pump_pilot_prediction_accuracy
+        attribute: rmse
+        name: Prediction RMSE (°C)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_prediction_accuracy
+        attribute: bias
+        name: Prediction bias (°C)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_prediction_accuracy
+        attribute: max_abs_error
+        name: Prediction max error (°C)
+  - type: history-graph
+    title: Temperatures
+    hours_to_show: 24
+    entities:
+      - entity: sensor.heat_pump_pilot_virtual_outdoor
+        name: Virtual Outdoor
+      - entity: sensor.ground_source_heat_pump
+        name: Supply Temp
+      - entity: climate.heat_pump_pilot
+        name: Pilot
+  - type: entities
+    title: Diagnostics
+    entities:
+      - entity: sensor.heat_pump_pilot_decision
+        secondary_info: last-changed
+      - entity: sensor.heat_pump_pilot_health
+        secondary_info: last-changed
+      - entity: sensor.heat_pump_pilot_control_state
+        secondary_info: last-changed
+      - entity: sensor.heat_pump_pilot_learning_state
+        secondary_info: last-changed
+      - entity: sensor.heat_pump_pilot_price_state
+        secondary_info: last-changed
+      - entity: binary_sensor.heat_pump_pilot_heating_detected
+        secondary_info: last-changed
+    show_header_toggle: false
+    state_color: true
+  - type: entities
+    title: Learning Details
+    show_header_toggle: false
+    entities:
+      - type: attribute
+        entity: sensor.heat_pump_pilot_learning_state
+        attribute: samples
+        name: Samples (window)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_learning_state
+        attribute: window_hours
+        name: Window (hours)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_learning_state
+        attribute: loss_change_ratio
+        name: Loss change ratio
+      - type: attribute
+        entity: sensor.heat_pump_pilot_learning_state
+        attribute: gain_change_ratio
+        name: Gain change ratio
+      - type: attribute
+        entity: sensor.heat_pump_pilot_learning_state
+        attribute: first_sample_time
+        name: First sample time
+      - type: attribute
+        entity: sensor.heat_pump_pilot_learning_state
+        attribute: last_sample_time
+        name: Last sample time
+      - type: attribute
+        entity: sensor.heat_pump_pilot_decision
+        attribute: heating_duty_cycle_ratio
+        name: Heating duty cycle ratio
+```
+
 ## Tests
 Tests live under `tests/`:
 - `test_forecast_utils.py`
