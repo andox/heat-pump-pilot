@@ -104,6 +104,8 @@ controlled entity. The mapping is:
 When overshoot warm bias is enabled, the MPC comfort penalty becomes asymmetric:
 above-target errors are penalized more strongly (ramping from `margin` to `full`),
 while below-target penalties are unchanged.
+This acts as a back-off when indoor temperature is above target by pushing the
+virtual outdoor higher so the pump is less likely to heat.
 
 ### Creating an outdoor temperature sensor from a weather entity
 If you only have a `weather.*` entity, create a template sensor:

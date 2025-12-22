@@ -136,6 +136,52 @@ def test_planned_virtual_outdoor_warm_shift_with_prices() -> None:
         assert planned_value <= base + 5.0
 
 
+def test_overshoot_bias_increases_virtual_outdoor_when_above_target() -> None:
+    """Playback scenario: above-target temps should increase warm bias."""
+    steps = _steps(12)
+    sequence = [False] * steps
+    outdoor_forecast = _repeat(1.0, steps)
+    price_forecast = _repeat(1.0, steps)
+    predicted_temperatures = _repeat(21.6, steps)
+
+    planned_no_bias = compute_planned_virtual_outdoor_temperatures(
+        sequence,
+        outdoor_forecast,
+        price_forecast,
+        predicted_temperatures=predicted_temperatures,
+        base_outdoor_fallback=outdoor_forecast[0],
+        virtual_heat_offset=5.0,
+        price_comfort_weight=0.5,
+        price_baseline=1.0,
+        target_temperature=20.5,
+        overshoot_warm_bias_enabled=False,
+        overshoot_warm_bias_margin=0.3,
+        overshoot_warm_bias_full=1.5,
+        max_virtual_outdoor=25.0,
+    )
+    planned_with_bias = compute_planned_virtual_outdoor_temperatures(
+        sequence,
+        outdoor_forecast,
+        price_forecast,
+        predicted_temperatures=predicted_temperatures,
+        base_outdoor_fallback=outdoor_forecast[0],
+        virtual_heat_offset=5.0,
+        price_comfort_weight=0.5,
+        price_baseline=1.0,
+        target_temperature=20.5,
+        overshoot_warm_bias_enabled=True,
+        overshoot_warm_bias_margin=0.3,
+        overshoot_warm_bias_full=1.5,
+        max_virtual_outdoor=25.0,
+    )
+
+    assert planned_no_bias is not None
+    assert planned_with_bias is not None
+    assert len(planned_with_bias) == len(planned_no_bias) == steps
+    assert any(b > a for a, b in zip(planned_no_bias, planned_with_bias))
+    assert all(b >= a for a, b in zip(planned_no_bias, planned_with_bias))
+
+
 def test_price_weight_reduces_heating_during_spike() -> None:
     """Playback scenario: higher price weight should cut heating during a spike."""
     horizon_hours = 24
