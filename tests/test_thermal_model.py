@@ -70,6 +70,20 @@ def test_rls_model_learns_gain_from_heating() -> None:
     assert estimator.heat_loss_coeff > 0
 
 
+def test_rls_model_learns_loss_from_cooling() -> None:
+    """RLS should increase loss coefficient when cooling faster than predicted."""
+    estimator = ThermalModelRlsEstimator(
+        seed=0.6, initial_heat_loss=0.02, initial_heat_gain=0.3, initial_temp=21.0, forgetting_factor=0.98
+    )
+    initial_loss = estimator.heat_loss_coeff
+    temp = 21.0
+    outdoor = 0.0
+    for _ in range(6):
+        temp -= 0.5
+        estimator.step(temp, outdoor, heat_on=False, dt_hours=0.25)
+    assert estimator.heat_loss_coeff > initial_loss
+
+
 def test_rls_persistence_round_trip() -> None:
     """Saved RLS state should restore cleanly."""
     estimator = ThermalModelRlsEstimator(
