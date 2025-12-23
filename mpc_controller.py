@@ -9,6 +9,8 @@ import math
 from statistics import median
 from typing import Iterable, Sequence
 
+from .virtual_outdoor_utils import compute_overshoot_warm_bias
+
 _LOGGER = logging.getLogger(__name__)
 
 # Thermal model coefficients for a 1 hour step.
@@ -47,9 +49,9 @@ class MpcController:
         time_step_hours: float = TIME_STEP_HOURS,
         heat_loss_coeff: float = HEAT_LOSS_COEFF,
         heat_gain_coeff: float = HEAT_GAIN_COEFF,
+        virtual_heat_offset: float = 0.0,
         overshoot_warm_bias_enabled: bool = False,
-        overshoot_warm_bias_margin: float = 0.3,
-        overshoot_warm_bias_full: float = 1.5,
+        overshoot_warm_bias_curve: str = "linear",
     ) -> None:
         self.target_temperature = target_temperature
         self.price_comfort_weight = price_comfort_weight
@@ -58,9 +60,9 @@ class MpcController:
         self.time_step_hours = time_step_hours
         self.heat_loss_coeff = heat_loss_coeff
         self.heat_gain_coeff = heat_gain_coeff
+        self.virtual_heat_offset = virtual_heat_offset
         self.overshoot_warm_bias_enabled = overshoot_warm_bias_enabled
-        self.overshoot_warm_bias_margin = overshoot_warm_bias_margin
-        self.overshoot_warm_bias_full = overshoot_warm_bias_full
+        self.overshoot_warm_bias_curve = overshoot_warm_bias_curve
         self._temp_resolution = TEMP_RESOLUTION
 
     def update_settings(
@@ -72,9 +74,9 @@ class MpcController:
         prediction_horizon_hours: int | None = None,
         heat_loss_coeff: float | None = None,
         heat_gain_coeff: float | None = None,
+        virtual_heat_offset: float | None = None,
         overshoot_warm_bias_enabled: bool | None = None,
-        overshoot_warm_bias_margin: float | None = None,
-        overshoot_warm_bias_full: float | None = None,
+        overshoot_warm_bias_curve: str | None = None,
     ) -> None:
         """Update controller parameters."""
         if target_temperature is not None:
@@ -89,12 +91,12 @@ class MpcController:
             self.heat_loss_coeff = heat_loss_coeff
         if heat_gain_coeff is not None:
             self.heat_gain_coeff = heat_gain_coeff
+        if virtual_heat_offset is not None:
+            self.virtual_heat_offset = virtual_heat_offset
         if overshoot_warm_bias_enabled is not None:
             self.overshoot_warm_bias_enabled = overshoot_warm_bias_enabled
-        if overshoot_warm_bias_margin is not None:
-            self.overshoot_warm_bias_margin = overshoot_warm_bias_margin
-        if overshoot_warm_bias_full is not None:
-            self.overshoot_warm_bias_full = overshoot_warm_bias_full
+        if overshoot_warm_bias_curve is not None:
+            self.overshoot_warm_bias_curve = overshoot_warm_bias_curve
 
     def suggest_control(
         self,
@@ -202,14 +204,13 @@ class MpcController:
             return penalty
         if delta <= 0.0:
             return penalty
-        margin = max(0.0, float(self.overshoot_warm_bias_margin))
-        full = float(self.overshoot_warm_bias_full)
-        if full <= margin:
-            full = margin + 1.0
-        if delta <= margin:
-            return penalty
-        fraction = min(1.0, max(0.0, (delta - margin) / max(0.001, full - margin)))
-        return penalty * (1.0 + fraction)
+        _, multiplier, _, _ = compute_overshoot_warm_bias(
+            delta,
+            self.comfort_temperature_tolerance,
+            self.virtual_heat_offset,
+            self.overshoot_warm_bias_curve,
+        )
+        return penalty * multiplier
 
     def _simulate_sequence(self, indoor_temp: float, outdoor: Sequence[float], sequence: Sequence[bool]) -> list[float]:
         """Simulate temperatures for a chosen sequence.

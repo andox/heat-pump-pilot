@@ -28,8 +28,7 @@ from .const import (
     CONF_HEATING_SUPPLY_TEMP_THRESHOLD,
     CONF_OUTDOOR_TEMP,
     CONF_OVERSHOOT_WARM_BIAS_ENABLED,
-    CONF_OVERSHOOT_WARM_BIAS_FULL,
-    CONF_OVERSHOOT_WARM_BIAS_MARGIN,
+    CONF_OVERSHOOT_WARM_BIAS_CURVE,
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
@@ -59,11 +58,11 @@ from .const import (
     DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
     DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD,
     DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
-    DEFAULT_OVERSHOOT_WARM_BIAS_FULL,
-    DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN,
+    DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
     DOMAIN,
     LEARNING_MODEL_EKF,
     LEARNING_MODEL_RLS,
+    OVERSHOOT_WARM_BIAS_CURVES,
     PERFORMANCE_WINDOW_OPTIONS,
 )
 
@@ -95,8 +94,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_MONITOR_ONLY: user_input.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
-                CONF_OVERSHOOT_WARM_BIAS_MARGIN: DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN,
-                CONF_OVERSHOOT_WARM_BIAS_FULL: DEFAULT_OVERSHOOT_WARM_BIAS_FULL,
+                CONF_OVERSHOOT_WARM_BIAS_CURVE: DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
                 CONF_HEAT_LOSS_COEFFICIENT: DEFAULT_HEAT_LOSS_COEFFICIENT,
                 CONF_THERMAL_RESPONSE_SEED: DEFAULT_THERMAL_RESPONSE_SEED,
                 CONF_LEARNING_MODEL: user_input.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
@@ -232,11 +230,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: user_input.get(
                     CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED
                 ),
-                CONF_OVERSHOOT_WARM_BIAS_MARGIN: user_input.get(
-                    CONF_OVERSHOOT_WARM_BIAS_MARGIN, DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN
-                ),
-                CONF_OVERSHOOT_WARM_BIAS_FULL: user_input.get(
-                    CONF_OVERSHOOT_WARM_BIAS_FULL, DEFAULT_OVERSHOOT_WARM_BIAS_FULL
+                CONF_OVERSHOOT_WARM_BIAS_CURVE: user_input.get(
+                    CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE
                 ),
                 CONF_HEAT_LOSS_COEFFICIENT: user_input[CONF_HEAT_LOSS_COEFFICIENT],
                 CONF_THERMAL_RESPONSE_SEED: user_input[CONF_THERMAL_RESPONSE_SEED],
@@ -400,27 +395,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     default=options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED),
                 ): selector.BooleanSelector(),
                 vol.Required(
-                    CONF_OVERSHOOT_WARM_BIAS_MARGIN,
-                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_MARGIN, DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.0,
-                        max=3.0,
-                        step=0.1,
-                        unit_of_measurement="°C",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_OVERSHOOT_WARM_BIAS_FULL,
-                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_FULL, DEFAULT_OVERSHOOT_WARM_BIAS_FULL),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.2,
-                        max=5.0,
-                        step=0.1,
-                        unit_of_measurement="°C",
-                        mode=selector.NumberSelectorMode.BOX,
+                    CONF_OVERSHOOT_WARM_BIAS_CURVE,
+                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(OVERSHOOT_WARM_BIAS_CURVES),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
                 vol.Required(

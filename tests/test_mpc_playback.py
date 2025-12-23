@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from statistics import fmean
+
 from mpc_controller import MpcController
 from virtual_outdoor_utils import compute_planned_virtual_outdoor_temperatures
 
@@ -12,6 +15,18 @@ def _repeat(value: float, count: int) -> list[float]:
 
 def _steps(hours: int) -> int:
     return int(hours / STEP_HOURS)
+
+
+def _load_sample_series(key: str) -> list[float]:
+    sample_path = Path(__file__).resolve().parents[1] / "sample" / "sensor_sample.txt"
+    prefix = f"{key}:"
+    for line in sample_path.read_text(encoding="utf-8").splitlines():
+        if line.strip().startswith(prefix):
+            payload = line.split(":", 1)[1].strip()
+            if not payload:
+                return []
+            return [float(value.strip()) for value in payload.split(",") if value.strip()]
+    return []
 
 
 def test_preheat_when_prices_rise() -> None:
@@ -121,10 +136,10 @@ def test_planned_virtual_outdoor_warm_shift_with_prices() -> None:
         virtual_heat_offset=5.0,
         price_comfort_weight=0.5,
         price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
         target_temperature=20.0,
         overshoot_warm_bias_enabled=True,
-        overshoot_warm_bias_margin=0.3,
-        overshoot_warm_bias_full=1.5,
+        overshoot_warm_bias_curve="linear",
         max_virtual_outdoor=25.0,
     )
 
@@ -153,10 +168,10 @@ def test_overshoot_bias_increases_virtual_outdoor_when_above_target() -> None:
         virtual_heat_offset=5.0,
         price_comfort_weight=0.5,
         price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
         target_temperature=20.5,
         overshoot_warm_bias_enabled=False,
-        overshoot_warm_bias_margin=0.3,
-        overshoot_warm_bias_full=1.5,
+        overshoot_warm_bias_curve="linear",
         max_virtual_outdoor=25.0,
     )
     planned_with_bias = compute_planned_virtual_outdoor_temperatures(
@@ -168,10 +183,10 @@ def test_overshoot_bias_increases_virtual_outdoor_when_above_target() -> None:
         virtual_heat_offset=5.0,
         price_comfort_weight=0.5,
         price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
         target_temperature=20.5,
         overshoot_warm_bias_enabled=True,
-        overshoot_warm_bias_margin=0.3,
-        overshoot_warm_bias_full=1.5,
+        overshoot_warm_bias_curve="linear",
         max_virtual_outdoor=25.0,
     )
 
@@ -215,3 +230,43 @@ def test_price_weight_reduces_heating_during_spike() -> None:
     assert comfort_result is not None
     assert price_result is not None
     assert sum(price_result.sequence) <= sum(comfort_result.sequence)
+
+
+def test_planned_virtual_outdoor_with_real_sample_data() -> None:
+    """Playback scenario: real sample arrays produce sane planned temperatures."""
+    predicted = _load_sample_series("predicted_temperatures")
+    price_forecast = _load_sample_series("price_forecast")
+    outdoor_forecast = _load_sample_series("outdoor_forecast")
+
+    assert predicted
+    assert price_forecast
+    assert outdoor_forecast
+
+    steps = min(len(predicted), len(price_forecast), len(outdoor_forecast))
+    predicted = predicted[:steps]
+    price_forecast = price_forecast[:steps]
+    outdoor_forecast = outdoor_forecast[:steps]
+    sequence = [False] * steps
+    price_baseline = fmean(price_forecast)
+
+    planned = compute_planned_virtual_outdoor_temperatures(
+        sequence,
+        outdoor_forecast,
+        price_forecast,
+        predicted_temperatures=predicted,
+        base_outdoor_fallback=outdoor_forecast[0],
+        virtual_heat_offset=8.0,
+        price_comfort_weight=0.8,
+        price_baseline=price_baseline,
+        comfort_temperature_tolerance=1.0,
+        target_temperature=20.5,
+        overshoot_warm_bias_enabled=True,
+        overshoot_warm_bias_curve="linear",
+        max_virtual_outdoor=25.0,
+    )
+
+    assert planned is not None
+    assert len(planned) == steps
+    for planned_value, base in zip(planned, outdoor_forecast):
+        assert planned_value >= base
+        assert planned_value <= base + 8.0

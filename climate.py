@@ -45,8 +45,7 @@ from .const import (
     CONF_MONITOR_ONLY,
     CONF_OUTDOOR_TEMP,
     CONF_OVERSHOOT_WARM_BIAS_ENABLED,
-    CONF_OVERSHOOT_WARM_BIAS_FULL,
-    CONF_OVERSHOOT_WARM_BIAS_MARGIN,
+    CONF_OVERSHOOT_WARM_BIAS_CURVE,
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
@@ -70,8 +69,7 @@ from .const import (
     DEFAULT_PERFORMANCE_WINDOW_HOURS,
     DEFAULT_PREDICTION_HORIZON_HOURS,
     DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
-    DEFAULT_OVERSHOOT_WARM_BIAS_FULL,
-    DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN,
+    DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
     DEFAULT_PRICE_COMFORT_WEIGHT,
     DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
@@ -81,6 +79,7 @@ from .const import (
     DOMAIN,
     LEARNING_MODEL_EKF,
     LEARNING_MODEL_RLS,
+    OVERSHOOT_WARM_BIAS_CURVES,
     PERFORMANCE_WINDOW_OPTIONS,
     SIGNAL_DECISION_UPDATED,
     SIGNAL_OPTIONS_UPDATED,
@@ -93,7 +92,7 @@ from .performance_utils import PerformanceSample, compute_comfort_score, compute
 from .performance_history import PerformanceHistoryStorage
 from .price_history import PriceHistoryStorage
 from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator, ThermalModelStorage
-from .virtual_outdoor_utils import compute_planned_virtual_outdoor_temperatures
+from .virtual_outdoor_utils import compute_overshoot_warm_bias, compute_planned_virtual_outdoor_temperatures
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -180,11 +179,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._overshoot_warm_bias_enabled: bool = bool(
             self._options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED)
         )
-        self._overshoot_warm_bias_margin: float = float(
-            self._options.get(CONF_OVERSHOOT_WARM_BIAS_MARGIN, DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN)
-        )
-        self._overshoot_warm_bias_full: float = float(
-            self._options.get(CONF_OVERSHOOT_WARM_BIAS_FULL, DEFAULT_OVERSHOOT_WARM_BIAS_FULL)
+        self._overshoot_warm_bias_curve: str = str(
+            self._options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
         )
         self._learning_supply_temp_on_margin: float = float(
             self._options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN)
@@ -211,8 +207,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             heat_loss_coeff=self._heat_loss_coeff,
             heat_gain_coeff=self._thermal_model.heat_gain_coeff,
             overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
-            overshoot_warm_bias_margin=self._overshoot_warm_bias_margin,
-            overshoot_warm_bias_full=self._overshoot_warm_bias_full,
+            virtual_heat_offset=self._virtual_heat_offset,
+            overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
         )
 
         self._indoor_temp: float | None = None
@@ -1149,11 +1145,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._overshoot_warm_bias_enabled = bool(
             self._options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED)
         )
-        self._overshoot_warm_bias_margin = float(
-            self._options.get(CONF_OVERSHOOT_WARM_BIAS_MARGIN, DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN)
-        )
-        self._overshoot_warm_bias_full = float(
-            self._options.get(CONF_OVERSHOOT_WARM_BIAS_FULL, DEFAULT_OVERSHOOT_WARM_BIAS_FULL)
+        self._overshoot_warm_bias_curve = str(
+            self._options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
         )
         self._learning_supply_temp_on_margin = float(
             self._options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN)
@@ -1210,8 +1203,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             heat_loss_coeff=self._heat_loss_coeff,
             heat_gain_coeff=self._thermal_model.heat_gain_coeff,
             overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
-            overshoot_warm_bias_margin=self._overshoot_warm_bias_margin,
-            overshoot_warm_bias_full=self._overshoot_warm_bias_full,
+            virtual_heat_offset=self._virtual_heat_offset,
+            overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
         )
         self._resubscribe_sensors()
         self._schedule_control_loop()
@@ -1399,13 +1392,14 @@ class MpcHeatPumpClimate(ClimateEntity):
             # Overshoot warm-bias: when indoor is above target, bias the curve warmer to back off heating.
             if self._overshoot_warm_bias_enabled and self._indoor_temp is not None and offset > 0:
                 overshoot = float(self._indoor_temp) - float(self._target_temperature)
-                margin = max(0.0, float(self._overshoot_warm_bias_margin))
-                full = float(self._overshoot_warm_bias_full)
-                if full <= margin:
-                    full = margin + 1.0
-                if overshoot > margin:
-                    fraction = min(1.0, max(0.0, (overshoot - margin) / max(0.001, full - margin)))
-                    boost_total += fraction * offset
+                if overshoot > float(self._comfort_tolerance):
+                    bias, _, _, _ = compute_overshoot_warm_bias(
+                        overshoot,
+                        self._comfort_tolerance,
+                        offset,
+                        self._overshoot_warm_bias_curve,
+                    )
+                    boost_total += bias
 
             # Clamp the warm-shift so we never bias more than the configured offset.
             boost_total = min(boost_total, offset)
@@ -1737,17 +1731,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             comfort_tolerance = DEFAULT_COMFORT_TEMPERATURE_TOLERANCE
 
         overshoot_enabled = bool(options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED))
-        overshoot_margin = self._state_to_float(options.get(CONF_OVERSHOOT_WARM_BIAS_MARGIN))
-        if overshoot_margin is None:
-            overshoot_margin = DEFAULT_OVERSHOOT_WARM_BIAS_MARGIN
-        overshoot_margin = max(0.0, float(overshoot_margin))
-
-        overshoot_full = self._state_to_float(options.get(CONF_OVERSHOOT_WARM_BIAS_FULL))
-        if overshoot_full is None:
-            overshoot_full = DEFAULT_OVERSHOOT_WARM_BIAS_FULL
-        overshoot_full = float(overshoot_full)
-        if overshoot_full <= overshoot_margin:
-            overshoot_full = overshoot_margin + 1.0
+        overshoot_curve = options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
+        if overshoot_curve not in OVERSHOOT_WARM_BIAS_CURVES:
+            overshoot_curve = DEFAULT_OVERSHOOT_WARM_BIAS_CURVE
 
         learning_on_margin = self._state_to_float(options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN))
         if learning_on_margin is None:
@@ -1783,8 +1769,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET, DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET
             ),
             CONF_OVERSHOOT_WARM_BIAS_ENABLED: overshoot_enabled,
-            CONF_OVERSHOOT_WARM_BIAS_MARGIN: overshoot_margin,
-            CONF_OVERSHOOT_WARM_BIAS_FULL: overshoot_full,
+            CONF_OVERSHOOT_WARM_BIAS_CURVE: overshoot_curve,
             CONF_HEAT_LOSS_COEFFICIENT: options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT),
             CONF_THERMAL_RESPONSE_SEED: options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
             CONF_LEARNING_MODEL: learning_model,
@@ -1858,7 +1843,9 @@ class MpcHeatPumpClimate(ClimateEntity):
         health, health_reasons = self._compute_health(now)
         learning_state, learning_details = self._compute_learning_state(now)
         heating_detected = self._get_heating_detected(now)
-        overshoot_warm_bias_multiplier = self._comfort_overshoot_multiplier()
+        overshoot_bias, overshoot_warm_bias_multiplier, overshoot_min_bias, overshoot_max_bias = (
+            self._comfort_overshoot_multiplier()
+        )
         current_price_raw = self._last_price_forecast[0] if self._last_price_forecast else None
         try:
             current_price = float(current_price_raw) if current_price_raw is not None else None
@@ -1897,8 +1884,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             price_baseline=self._last_result.price_baseline if self._last_result else None,
             target_temperature=self._target_temperature,
             overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
-            overshoot_warm_bias_margin=self._overshoot_warm_bias_margin,
-            overshoot_warm_bias_full=self._overshoot_warm_bias_full,
+            comfort_temperature_tolerance=self._comfort_tolerance,
+            overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
             max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
         )
         payload = {
@@ -1928,8 +1915,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             "heating_duty_cycle_ratio": heating_duty_cycle_ratio,
             "virtual_outdoor_heat_offset": self._virtual_heat_offset,
             "overshoot_warm_bias_enabled": self._overshoot_warm_bias_enabled,
-            "overshoot_warm_bias_margin": self._overshoot_warm_bias_margin,
-            "overshoot_warm_bias_full": self._overshoot_warm_bias_full,
+            "overshoot_warm_bias_curve": self._overshoot_warm_bias_curve,
+            "overshoot_warm_bias_min_bias": overshoot_min_bias,
+            "overshoot_warm_bias_max_bias": overshoot_max_bias,
+            "overshoot_warm_bias_applied": overshoot_bias,
             "overshoot_warm_bias_multiplier": overshoot_warm_bias_multiplier,
             "learning_supply_temp_on_margin": self._learning_supply_temp_on_margin,
             "learning_supply_temp_off_margin": self._learning_supply_temp_off_margin,
@@ -1958,23 +1947,19 @@ class MpcHeatPumpClimate(ClimateEntity):
         entry_data["performance"] = self._compute_performance_summary(now)
         async_dispatcher_send(self.hass, f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}")
 
-    def _comfort_overshoot_multiplier(self) -> float | None:
-        """Return the active above-target comfort penalty multiplier."""
+    def _comfort_overshoot_multiplier(self) -> tuple[float, float, float, float]:
+        """Return (bias, multiplier, min_bias, max_bias) for above-target comfort penalty."""
         if self._indoor_temp is None:
-            return None
+            return 0.0, 1.0, 0.0, 0.0
         if not self._overshoot_warm_bias_enabled:
-            return 1.0
+            return 0.0, 1.0, 0.0, 0.0
         delta = float(self._indoor_temp) - float(self._target_temperature)
-        if delta <= 0.0:
-            return 1.0
-        margin = max(0.0, float(self._overshoot_warm_bias_margin))
-        full = float(self._overshoot_warm_bias_full)
-        if full <= margin:
-            full = margin + 1.0
-        if delta <= margin:
-            return 1.0
-        fraction = min(1.0, max(0.0, (delta - margin) / max(0.001, full - margin)))
-        return 1.0 + fraction
+        return compute_overshoot_warm_bias(
+            delta,
+            self._comfort_tolerance,
+            self._virtual_heat_offset,
+            self._overshoot_warm_bias_curve,
+        )
 
     def _notification_id(self, event_id: str) -> str:
         return f"{DOMAIN}_{self.config_entry.entry_id}_{event_id}"

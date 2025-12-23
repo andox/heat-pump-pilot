@@ -10,7 +10,10 @@ COMPONENT_ROOT = Path(__file__).resolve().parents[1]
 if str(COMPONENT_ROOT) not in sys.path:
     sys.path.insert(0, str(COMPONENT_ROOT))
 
-from virtual_outdoor_utils import compute_planned_virtual_outdoor_temperatures  # noqa: E402
+from virtual_outdoor_utils import (  # noqa: E402
+    compute_overshoot_warm_bias,
+    compute_planned_virtual_outdoor_temperatures,
+)
 
 
 def test_planned_virtual_outdoor_heating_is_colder_by_offset() -> None:
@@ -64,10 +67,37 @@ def test_planned_virtual_outdoor_overshoot_warm_bias() -> None:
         virtual_heat_offset=10.0,
         price_comfort_weight=0.0,
         price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
         target_temperature=20.0,
         overshoot_warm_bias_enabled=True,
-        overshoot_warm_bias_margin=0.5,
-        overshoot_warm_bias_full=1.5,
+        overshoot_warm_bias_curve="linear",
     )
-    # overshoot=1.0, margin=0.5, full=1.5 => fraction=0.5 => boost=5
-    assert planned == [11.0]
+    # overshoot=1.0, tolerance=0.5 => scale=1.0, bias=max (offset=10)
+    assert planned == [16.0]
+
+
+def test_overshoot_warm_bias_curves_shape() -> None:
+    bias_linear, _, min_bias, max_bias = compute_overshoot_warm_bias(
+        overshoot=1.0,
+        tolerance=0.5,
+        virtual_heat_offset=8.0,
+        curve="linear",
+    )
+    bias_quadratic, _, _, _ = compute_overshoot_warm_bias(
+        overshoot=0.75,
+        tolerance=0.5,
+        virtual_heat_offset=8.0,
+        curve="quadratic",
+    )
+    bias_sqrt, _, _, _ = compute_overshoot_warm_bias(
+        overshoot=0.75,
+        tolerance=0.5,
+        virtual_heat_offset=8.0,
+        curve="sqrt",
+    )
+
+    assert min_bias == 4.0
+    assert max_bias == 8.0
+    assert bias_linear == max_bias
+    assert min_bias < bias_quadratic < bias_linear
+    assert bias_sqrt > bias_quadratic

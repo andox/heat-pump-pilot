@@ -35,8 +35,6 @@ Required entities:
 - Indoor temperature sensor (`sensor.*`).
 - Outdoor temperature sensor (`sensor.*`).
 - Price sensor (`sensor.*`).
-- Weather entity (`weather.*` or a sensor with a `forecast` attribute). The integration will
-  fall back to a flat forecast from the outdoor sensor if forecast data is unavailable.
 
 Optional entities:
 - Controlled entity (the output target you want the integration to drive).
@@ -71,8 +69,9 @@ Core control:
 Virtual outdoor control:
 - Virtual outdoor heat offset (default: 5.0°C): how much colder to request when heating; start at 3–8°C.
 - Overshoot warm bias enabled (default: true): warm bias when predicted above target; also boosts MPC comfort penalty when above target.
-- Overshoot warm bias margin (default: 0.3°C): overshoot before bias starts; 0.2–0.5°C is common.
-- Overshoot warm bias full (default: 1.5°C): overshoot at which bias reaches full strength.
+- Overshoot warm bias curve (default: linear): shape of the back-off ramp; options are linear, quadratic, cubic, sqrt.
+- Overshoot warm bias min/max: derived from the heat offset: min = virtual_outdoor_heat_offset / 2, max = virtual_outdoor_heat_offset.
+  - Curve shapes: linear = proportional ramp; quadratic/cubic = gentle early, stronger near full effect; sqrt = stronger early, gentler later.
 
 Learning:
 - Learning model (default: ekf): ekf is stable; rls can react faster to changes.
@@ -102,8 +101,11 @@ controlled entity. The mapping is:
   (optionally) indoor overshoot. Warm bias is capped by `virtual_heat_offset`.
 - A hard cap of 25C prevents pushing the pump into summer/no-heat mode.
 When overshoot warm bias is enabled, the MPC comfort penalty becomes asymmetric:
-above-target errors are penalized more strongly (ramping from `margin` to `full`),
-while below-target penalties are unchanged.
+above-target errors are penalized more strongly once indoor temperature exceeds
+the comfort tolerance. The warm-bias back-off ramps from a minimum of
+`virtual_outdoor_heat_offset / 2` to a maximum of `virtual_outdoor_heat_offset`,
+using the selected curve (linear/quadratic/cubic/sqrt). Below-target penalties
+are unchanged.
 This acts as a back-off when indoor temperature is above target by pushing the
 virtual outdoor higher so the pump is less likely to heat.
 
@@ -193,7 +195,10 @@ This means learning, price baselines, and performance scores survive restarts.
 
 ## Sensors and diagnostics
 Key diagnostic sensors:
-- Heat Pump Pilot Decision: last MPC action plus forecast/plan details, including `overshoot_warm_bias_multiplier`.
+- Heat Pump Pilot Decision: last MPC action plus forecast/plan details, including:
+  `overshoot_warm_bias_enabled`, `overshoot_warm_bias_curve`,
+  `overshoot_warm_bias_min_bias`, `overshoot_warm_bias_max_bias`,
+  `overshoot_warm_bias_applied`, and `overshoot_warm_bias_multiplier`.
 - Heat Pump Pilot Health: overall health with reasons (missing sensors, stale control, etc).
 - Heat Pump Pilot Control State: whether the integration is controlling or monitoring.
 - Heat Pump Pilot Learning State: learning vs stable, with change ratios and window stats.
@@ -339,6 +344,22 @@ cards:
         entity: sensor.heat_pump_pilot_decision
         attribute: heating_duty_cycle_ratio
         name: Heating duty cycle ratio
+      - type: attribute
+        entity: sensor.heat_pump_pilot_decision
+        attribute: overshoot_warm_bias_applied
+        name: Back-off applied (°C)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_decision
+        attribute: overshoot_warm_bias_curve
+        name: Back-off curve
+      - type: attribute
+        entity: sensor.heat_pump_pilot_decision
+        attribute: overshoot_warm_bias_min_bias
+        name: Back-off min (°C)
+      - type: attribute
+        entity: sensor.heat_pump_pilot_decision
+        attribute: overshoot_warm_bias_max_bias
+        name: Back-off max (°C)
 ```
 
 ## Tests

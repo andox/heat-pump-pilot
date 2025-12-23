@@ -5,6 +5,7 @@ This module is intentionally free of Home Assistant imports so it can be unit-te
 
 from __future__ import annotations
 
+import math
 from typing import Iterable, Sequence
 
 
@@ -40,10 +41,10 @@ def compute_planned_virtual_outdoor_temperatures(
     virtual_heat_offset: float,
     price_comfort_weight: float,
     price_baseline: float | None,
+    comfort_temperature_tolerance: float,
     target_temperature: float | None = None,
     overshoot_warm_bias_enabled: bool = False,
-    overshoot_warm_bias_margin: float = 0.3,
-    overshoot_warm_bias_full: float = 1.5,
+    overshoot_warm_bias_curve: str = "linear",
     max_virtual_outdoor: float = 25.0,
 ) -> list[float] | None:
     """Return a per-step virtual outdoor temperature plan.
@@ -92,19 +93,10 @@ def compute_planned_virtual_outdoor_temperatures(
         except (TypeError, ValueError):
             target = None
 
-    margin = 0.0
-    full = 0.0
-    if overshoot_warm_bias_enabled:
-        try:
-            margin = max(0.0, float(overshoot_warm_bias_margin))
-        except (TypeError, ValueError):
-            margin = 0.0
-        try:
-            full = float(overshoot_warm_bias_full)
-        except (TypeError, ValueError):
-            full = margin + 1.0
-        if full <= margin:
-            full = margin + 1.0
+    try:
+        tolerance = max(0.0, float(comfort_temperature_tolerance))
+    except (TypeError, ValueError):
+        tolerance = 0.0
 
     planned: list[float] = []
     for idx, heat_on in enumerate(sequence):
@@ -122,9 +114,14 @@ def compute_planned_virtual_outdoor_temperatures(
 
             if overshoot_warm_bias_enabled and target is not None:
                 overshoot = predicted[idx] - target
-                if overshoot > margin:
-                    fraction = min(1.0, max(0.0, (overshoot - margin) / max(0.001, full - margin)))
-                    boost_total += fraction * offset
+                if overshoot > tolerance:
+                    bias, _, _, _ = compute_overshoot_warm_bias(
+                        overshoot,
+                        tolerance,
+                        offset,
+                        overshoot_warm_bias_curve,
+                    )
+                    boost_total += bias
 
             boost_total = min(max(0.0, boost_total), offset)
             value += boost_total
@@ -132,3 +129,48 @@ def compute_planned_virtual_outdoor_temperatures(
         planned.append(min(value, max_virtual_outdoor))
 
     return planned
+
+
+def compute_overshoot_warm_bias(
+    overshoot: float,
+    tolerance: float,
+    virtual_heat_offset: float,
+    curve: str,
+) -> tuple[float, float, float, float]:
+    """Return (bias, multiplier, min_bias, max_bias) for overshoot warm-bias."""
+    try:
+        offset = max(0.0, float(virtual_heat_offset))
+    except (TypeError, ValueError):
+        offset = 0.0
+
+    if offset <= 0:
+        return 0.0, 1.0, 0.0, 0.0
+
+    try:
+        tol = max(0.0, float(tolerance))
+    except (TypeError, ValueError):
+        tol = 0.0
+
+    min_bias = 0.5 * offset
+    max_bias = offset
+
+    if overshoot <= tol:
+        return 0.0, 1.0, min_bias, max_bias
+
+    scale = (overshoot - tol) / max(tol, 0.1)
+    scale = min(1.0, max(0.0, scale))
+
+    shaped = _curve_scale(scale, curve)
+    bias = min_bias + (max_bias - min_bias) * shaped
+    multiplier = 1.0 + (bias / offset)
+    return bias, multiplier, min_bias, max_bias
+
+
+def _curve_scale(scale: float, curve: str) -> float:
+    if curve == "quadratic":
+        return scale * scale
+    if curve == "cubic":
+        return scale * scale * scale
+    if curve == "sqrt":
+        return math.sqrt(scale)
+    return scale
