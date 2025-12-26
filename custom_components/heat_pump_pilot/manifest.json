@@ -2,7 +2,7 @@
   "domain": "heat_pump_pilot",
   "name": "Heat Pump Pilot",
   "icon": "mdi:heat-pump",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "documentation": "https://github.com/andox/heat-pump-pilot",
   "requirements": [],
   "dependencies": [],
