@@ -60,10 +60,11 @@ recommended values when you’re unsure. Values are in the UI unless noted.
 
 Core control:
 - Target temperature (default: 21.0°C): your comfort setpoint; set to your normal desired indoor temp.
-- Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.7–0.95.
-- Control interval (default: 15 min): how often MPC runs; keep 15–30 min unless you have slow sensors.
-- Prediction horizon (default: 24 h): MPC planning horizon; 12–24 h is typical.
-- Comfort tolerance (default: 1.0°C): deadband before comfort penalty; 0.5–1.5°C is typical.
+- Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.7-0.95.
+- Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
+- Control interval (default: 15 min): how often MPC runs; keep 15-30 min unless you have slow sensors.
+- Prediction horizon (default: 24 h): MPC planning horizon; 12-24 h is typical.
+- Comfort tolerance (default: 1.0°C): deadband before comfort penalty; 0.5-1.5°C is typical.
 - Monitor only (default: false): true to disable control actions.
 
 Virtual outdoor control:
@@ -167,6 +168,13 @@ Two baselines are used:
 - **MPC baseline**: median of `price_forecast + price_history`.
 - **History baseline (24h)**: median of the last 24h of stored price history
   (requires at least 16 samples).
+
+Price-aware penalties only apply when `price_ratio > 1.0` (current price above baseline).
+The ratio is capped (default `3.0`) before applying the curve, and all curves are
+monotonic, so higher prices never reduce the penalty. The curve works alongside
+`price_comfort_weight`: higher weight magnifies the curve's impact on optimization.
+If you want gentle shifts, use `sqrt`; for aggressive avoidance of spikes, use
+`quadratic`; `linear` is a balanced default.
 
 Classification uses `ratio = current_price / baseline` with labels:
 - `< 0.75` -> `very_low`

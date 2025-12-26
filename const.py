@@ -34,6 +34,7 @@ CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN = "learning_supply_temp_off_margin"
 CONF_LEARNING_MODEL = "learning_model"
 CONF_RLS_FORGETTING_FACTOR = "rls_forgetting_factor"
 CONF_PERFORMANCE_WINDOW_HOURS = "performance_window_hours"
+CONF_PRICE_PENALTY_CURVE = "price_penalty_curve"
 
 LEARNING_MODEL_EKF = "ekf"
 LEARNING_MODEL_RLS = "rls"
@@ -58,10 +59,13 @@ DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN = 1.0
 DEFAULT_LEARNING_MODEL = LEARNING_MODEL_EKF
 DEFAULT_RLS_FORGETTING_FACTOR = 0.99
 DEFAULT_PERFORMANCE_WINDOW_HOURS = 24
+DEFAULT_PRICE_PENALTY_CURVE = "linear"
+DEFAULT_PRICE_RATIO_CAP = 3.0
 
 PERFORMANCE_WINDOW_OPTIONS = (6, 12, 24, 48, 72, 96)
 
 OVERSHOOT_WARM_BIAS_CURVES = ("linear", "quadratic", "cubic", "sqrt")
+PRICE_PENALTY_CURVES = ("linear", "sqrt", "quadratic")
 
 SIGNAL_OPTIONS_UPDATED = "heat_pump_pilot_options_updated"
 SIGNAL_DECISION_UPDATED = "heat_pump_pilot_decision_updated"

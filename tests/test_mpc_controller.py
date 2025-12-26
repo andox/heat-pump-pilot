@@ -229,9 +229,9 @@ def test_overshoot_bias_increases_above_target_penalty() -> None:
         time_step_hours=1.0,
         heat_loss_coeff=0.0,
         heat_gain_coeff=1.0,
+        virtual_heat_offset=5.0,
         overshoot_warm_bias_enabled=True,
-        overshoot_warm_bias_margin=0.5,
-        overshoot_warm_bias_full=1.5,
+        overshoot_warm_bias_curve="linear",
     )
     without_bias = MpcController(
         target_temperature=20.0,
@@ -241,9 +241,9 @@ def test_overshoot_bias_increases_above_target_penalty() -> None:
         time_step_hours=1.0,
         heat_loss_coeff=0.0,
         heat_gain_coeff=1.0,
+        virtual_heat_offset=5.0,
         overshoot_warm_bias_enabled=False,
-        overshoot_warm_bias_margin=0.5,
-        overshoot_warm_bias_full=1.5,
+        overshoot_warm_bias_curve="linear",
     )
 
     assert with_bias._comfort_penalty(19.0) == without_bias._comfort_penalty(19.0)

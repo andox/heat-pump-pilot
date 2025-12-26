@@ -9,7 +9,14 @@ import math
 from statistics import median
 from typing import Iterable, Sequence
 
-from .virtual_outdoor_utils import compute_overshoot_warm_bias
+try:
+    from .const import DEFAULT_PRICE_PENALTY_CURVE, DEFAULT_PRICE_RATIO_CAP, PRICE_PENALTY_CURVES
+except ImportError:  # pragma: no cover - allow direct module imports in tests
+    from const import DEFAULT_PRICE_PENALTY_CURVE, DEFAULT_PRICE_RATIO_CAP, PRICE_PENALTY_CURVES
+try:
+    from .virtual_outdoor_utils import compute_overshoot_warm_bias
+except ImportError:  # pragma: no cover - allow direct module imports in tests
+    from virtual_outdoor_utils import compute_overshoot_warm_bias
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +53,8 @@ class MpcController:
         price_comfort_weight: float,
         comfort_temperature_tolerance: float,
         prediction_horizon_hours: int,
+        price_penalty_curve: str = DEFAULT_PRICE_PENALTY_CURVE,
+        price_ratio_cap: float = DEFAULT_PRICE_RATIO_CAP,
         time_step_hours: float = TIME_STEP_HOURS,
         heat_loss_coeff: float = HEAT_LOSS_COEFF,
         heat_gain_coeff: float = HEAT_GAIN_COEFF,
@@ -55,6 +64,10 @@ class MpcController:
     ) -> None:
         self.target_temperature = target_temperature
         self.price_comfort_weight = price_comfort_weight
+        self.price_penalty_curve = (
+            price_penalty_curve if price_penalty_curve in PRICE_PENALTY_CURVES else DEFAULT_PRICE_PENALTY_CURVE
+        )
+        self.price_ratio_cap = max(float(price_ratio_cap), 1.0)
         self.comfort_temperature_tolerance = comfort_temperature_tolerance
         self.prediction_horizon_hours = prediction_horizon_hours
         self.time_step_hours = time_step_hours
@@ -70,6 +83,8 @@ class MpcController:
         *,
         target_temperature: float | None = None,
         price_comfort_weight: float | None = None,
+        price_penalty_curve: str | None = None,
+        price_ratio_cap: float | None = None,
         comfort_temperature_tolerance: float | None = None,
         prediction_horizon_hours: int | None = None,
         heat_loss_coeff: float | None = None,
@@ -83,6 +98,12 @@ class MpcController:
             self.target_temperature = target_temperature
         if price_comfort_weight is not None:
             self.price_comfort_weight = price_comfort_weight
+        if price_penalty_curve is not None:
+            self.price_penalty_curve = (
+                price_penalty_curve if price_penalty_curve in PRICE_PENALTY_CURVES else DEFAULT_PRICE_PENALTY_CURVE
+            )
+        if price_ratio_cap is not None:
+            self.price_ratio_cap = max(float(price_ratio_cap), 1.0)
         if comfort_temperature_tolerance is not None:
             self.comfort_temperature_tolerance = comfort_temperature_tolerance
         if prediction_horizon_hours is not None:
@@ -148,6 +169,20 @@ class MpcController:
         """Convert a quantized temp bucket back to float."""
         return bucket * self._temp_resolution
 
+    def _apply_price_penalty_curve(self, ratio: float) -> float:
+        """Apply the configured price curve above the baseline ratio."""
+        if ratio <= 1.0:
+            return ratio
+        capped_ratio = min(ratio, self.price_ratio_cap)
+        x = max(0.0, capped_ratio - 1.0)
+        if self.price_penalty_curve == "sqrt":
+            adjusted = math.sqrt(x)
+        elif self.price_penalty_curve == "quadratic":
+            adjusted = x * x
+        else:
+            adjusted = x
+        return 1.0 + adjusted
+
     def _optimize(
         self,
         indoor_temp: float,
@@ -176,7 +211,8 @@ class MpcController:
                 # Penalize heating relative to the (median) baseline price.
                 # Using max_price here would squash the relative differences we care about.
                 baseline_denom = max(price_baseline, 1e-6)
-                price_penalty = current_price / baseline_denom
+                price_ratio = current_price / baseline_denom
+                price_penalty = self._apply_price_penalty_curve(price_ratio)
                 price_cost = self.price_comfort_weight * price_penalty * heat_power * self.time_step_hours
                 comfort_cost = (1.0 - self.price_comfort_weight) * comfort_penalty * self.time_step_hours
                 toggle_cost = TOGGLE_PENALTY if prev_action != -1 and bool(prev_action) != action else 0.0

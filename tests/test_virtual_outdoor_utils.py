@@ -25,6 +25,7 @@ def test_planned_virtual_outdoor_heating_is_colder_by_offset() -> None:
         virtual_heat_offset=5.0,
         price_comfort_weight=0.9,
         price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
     )
     assert planned == [5.0, 10.0]
 
@@ -38,6 +39,7 @@ def test_planned_virtual_outdoor_idle_warm_shift_clamped_to_offset() -> None:
         virtual_heat_offset=10.0,
         price_comfort_weight=1.0,
         price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
     )
     # ratio=3, boost = 1*(3-1)*10 = 20 clamped to 10 => 6+10
     assert planned == [16.0]
@@ -52,6 +54,7 @@ def test_planned_virtual_outdoor_respects_max_virtual_outdoor() -> None:
         virtual_heat_offset=10.0,
         price_comfort_weight=1.0,
         price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
         max_virtual_outdoor=25.0,
     )
     assert planned == [25.0]

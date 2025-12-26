@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from statistics import fmean
+from statistics import fmean, median
 
 from mpc_controller import MpcController
 from virtual_outdoor_utils import compute_planned_virtual_outdoor_temperatures
@@ -270,3 +270,138 @@ def test_planned_virtual_outdoor_with_real_sample_data() -> None:
     for planned_value, base in zip(planned, outdoor_forecast):
         assert planned_value >= base
         assert planned_value <= base + 8.0
+
+
+def test_price_penalty_curve_quadratic_penalizes_more_than_linear() -> None:
+    """Playback scenario: quadratic curve should avoid heating during pricey periods."""
+    steps = 8
+    outdoor_forecast = _repeat(19.0, steps)
+    price_forecast = [1.0, 1.0, 1.8, 1.8, 1.0, 1.0, 1.8, 1.8]
+    pricey_indices = [2, 3, 6, 7]
+
+    controller_kwargs = dict(
+        target_temperature=20.0,
+        price_comfort_weight=1.0,
+        comfort_temperature_tolerance=5.0,
+        prediction_horizon_hours=int(steps * STEP_HOURS),
+        time_step_hours=STEP_HOURS,
+        heat_loss_coeff=0.0,
+        heat_gain_coeff=1.0,
+    )
+    linear = MpcController(price_penalty_curve="linear", **controller_kwargs)
+    quadratic = MpcController(price_penalty_curve="quadratic", **controller_kwargs)
+
+    _, linear_result = linear.suggest_control(19.0, outdoor_forecast, price_forecast)
+    _, quadratic_result = quadratic.suggest_control(19.0, outdoor_forecast, price_forecast)
+
+    assert linear_result is not None
+    assert quadratic_result is not None
+    linear_pricey = sum(linear_result.sequence[idx] for idx in pricey_indices)
+    quadratic_pricey = sum(quadratic_result.sequence[idx] for idx in pricey_indices)
+    assert quadratic_pricey <= linear_pricey
+
+
+def test_price_penalty_curve_no_effect_at_or_below_baseline() -> None:
+    """Playback scenario: curve has no effect when prices do not exceed baseline."""
+    price_forecast = _load_sample_series("price_forecast")
+    outdoor_forecast = _load_sample_series("outdoor_forecast")
+    assert price_forecast
+    assert outdoor_forecast
+
+    baseline = median(price_forecast)
+    flat_prices = [baseline] * len(price_forecast)
+    steps = min(len(flat_prices), len(outdoor_forecast))
+    flat_prices = flat_prices[:steps]
+    outdoor_forecast = outdoor_forecast[:steps]
+
+    controller_kwargs = dict(
+        target_temperature=20.0,
+        price_comfort_weight=0.7,
+        comfort_temperature_tolerance=0.1,
+        prediction_horizon_hours=int(steps * STEP_HOURS),
+        time_step_hours=STEP_HOURS,
+        heat_loss_coeff=0.04,
+        heat_gain_coeff=0.6,
+    )
+    linear = MpcController(price_penalty_curve="linear", **controller_kwargs)
+    sqrt_curve = MpcController(price_penalty_curve="sqrt", **controller_kwargs)
+    quadratic = MpcController(price_penalty_curve="quadratic", **controller_kwargs)
+
+    _, linear_result = linear.suggest_control(19.2, outdoor_forecast, flat_prices)
+    _, sqrt_result = sqrt_curve.suggest_control(19.2, outdoor_forecast, flat_prices)
+    _, quadratic_result = quadratic.suggest_control(19.2, outdoor_forecast, flat_prices)
+
+    assert linear_result is not None
+    assert sqrt_result is not None
+    assert quadratic_result is not None
+    assert linear_result.sequence == sqrt_result.sequence == quadratic_result.sequence
+
+
+def test_price_penalty_curve_cap_limits_extreme_ratios() -> None:
+    """Playback scenario: extreme ratios are capped before applying the curve."""
+    price_forecast = _load_sample_series("price_forecast")
+    outdoor_forecast = _load_sample_series("outdoor_forecast")
+    assert price_forecast
+    assert outdoor_forecast
+
+    steps = min(len(price_forecast), len(outdoor_forecast))
+    price_forecast = price_forecast[:steps]
+    outdoor_forecast = outdoor_forecast[:steps]
+
+    controller = MpcController(
+        target_temperature=20.0,
+        price_comfort_weight=0.9,
+        price_penalty_curve="quadratic",
+        price_ratio_cap=2.0,
+        comfort_temperature_tolerance=0.0,
+        prediction_horizon_hours=int(steps * STEP_HOURS),
+        time_step_hours=STEP_HOURS,
+        heat_loss_coeff=0.04,
+        heat_gain_coeff=0.6,
+    )
+
+    _, result = controller.suggest_control(19.0, outdoor_forecast, price_forecast)
+    assert result is not None
+
+    capped_penalty = controller._apply_price_penalty_curve(10.0)
+    assert capped_penalty == 2.0
+
+
+def test_price_comfort_weight_shifts_heating_with_curve() -> None:
+    """Playback scenario: higher price weight with curves should reduce heating."""
+    price_forecast = _load_sample_series("price_forecast")
+    outdoor_forecast = _load_sample_series("outdoor_forecast")
+    assert price_forecast
+    assert outdoor_forecast
+
+    steps = min(len(price_forecast), len(outdoor_forecast))
+    price_forecast = price_forecast[:steps]
+    outdoor_forecast = outdoor_forecast[:steps]
+
+    comfort_first = MpcController(
+        target_temperature=20.5,
+        price_comfort_weight=0.2,
+        price_penalty_curve="quadratic",
+        comfort_temperature_tolerance=0.2,
+        prediction_horizon_hours=int(steps * STEP_HOURS),
+        time_step_hours=STEP_HOURS,
+        heat_loss_coeff=0.04,
+        heat_gain_coeff=0.6,
+    )
+    price_first = MpcController(
+        target_temperature=20.5,
+        price_comfort_weight=0.9,
+        price_penalty_curve="quadratic",
+        comfort_temperature_tolerance=0.2,
+        prediction_horizon_hours=int(steps * STEP_HOURS),
+        time_step_hours=STEP_HOURS,
+        heat_loss_coeff=0.04,
+        heat_gain_coeff=0.6,
+    )
+
+    _, comfort_result = comfort_first.suggest_control(19.0, outdoor_forecast, price_forecast)
+    _, price_result = price_first.suggest_control(19.0, outdoor_forecast, price_forecast)
+
+    assert comfort_result is not None
+    assert price_result is not None
+    assert sum(price_result.sequence) <= sum(comfort_result.sequence)

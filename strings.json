@@ -33,6 +33,7 @@
           "performance_window_hours": "Performance window (hours)",
           "monitor_only": "Monitor only (do not send control commands)",
           "virtual_outdoor_heat_offset": "Virtual outdoor offset when heating (°C)",
+          "price_penalty_curve": "Price penalty curve",
           "overshoot_warm_bias_enabled": "Enable overshoot warm-bias",
           "overshoot_warm_bias_curve": "Overshoot warm-bias curve",
           "heat_loss_coefficient": "Heat loss coefficient (house inertia)",

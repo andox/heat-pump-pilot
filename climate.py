@@ -49,6 +49,7 @@ from .const import (
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
+    CONF_PRICE_PENALTY_CURVE,
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
@@ -71,6 +72,7 @@ from .const import (
     DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
     DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
     DEFAULT_PRICE_COMFORT_WEIGHT,
+    DEFAULT_PRICE_PENALTY_CURVE,
     DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
@@ -80,6 +82,7 @@ from .const import (
     LEARNING_MODEL_EKF,
     LEARNING_MODEL_RLS,
     OVERSHOOT_WARM_BIAS_CURVES,
+    PRICE_PENALTY_CURVES,
     PERFORMANCE_WINDOW_OPTIONS,
     SIGNAL_DECISION_UPDATED,
     SIGNAL_OPTIONS_UPDATED,
@@ -154,6 +157,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._options = self._merge_options(entry.options)
         self._target_temperature: float = self._options[CONF_TARGET_TEMPERATURE]
         self._price_comfort_weight: float = self._options[CONF_PRICE_COMFORT_WEIGHT]
+        self._price_penalty_curve: str = self._options[CONF_PRICE_PENALTY_CURVE]
         self._control_interval: int = self._options[CONF_CONTROL_INTERVAL_MINUTES]
         self._prediction_horizon: int = self._options[CONF_PREDICTION_HORIZON_HOURS]
         self._comfort_tolerance: float = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
@@ -202,6 +206,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._controller = MpcController(
             target_temperature=self._target_temperature,
             price_comfort_weight=self._price_comfort_weight,
+            price_penalty_curve=self._price_penalty_curve,
             comfort_temperature_tolerance=self._comfort_tolerance,
             prediction_horizon_hours=self._prediction_horizon,
             heat_loss_coeff=self._heat_loss_coeff,
@@ -1122,6 +1127,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._options = self._merge_options(self.config_entry.options)
         self._target_temperature = self._options[CONF_TARGET_TEMPERATURE]
         self._price_comfort_weight = self._options[CONF_PRICE_COMFORT_WEIGHT]
+        self._price_penalty_curve = self._options[CONF_PRICE_PENALTY_CURVE]
         self._control_interval = self._options[CONF_CONTROL_INTERVAL_MINUTES]
         self._prediction_horizon = self._options[CONF_PREDICTION_HORIZON_HOURS]
         self._comfort_tolerance = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
@@ -1198,6 +1204,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._controller.update_settings(
             target_temperature=self._target_temperature,
             price_comfort_weight=self._price_comfort_weight,
+            price_penalty_curve=self._price_penalty_curve,
             comfort_temperature_tolerance=self._comfort_tolerance,
             prediction_horizon_hours=self._prediction_horizon,
             heat_loss_coeff=self._heat_loss_coeff,
@@ -1726,6 +1733,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             price_comfort_weight = DEFAULT_PRICE_COMFORT_WEIGHT
         price_comfort_weight = min(1.0, max(0.0, float(price_comfort_weight)))
 
+        price_penalty_curve = options.get(CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE)
+        if price_penalty_curve not in PRICE_PENALTY_CURVES:
+            price_penalty_curve = DEFAULT_PRICE_PENALTY_CURVE
+
         comfort_tolerance = self._state_to_float(options.get(CONF_COMFORT_TEMPERATURE_TOLERANCE))
         if comfort_tolerance is None:
             comfort_tolerance = DEFAULT_COMFORT_TEMPERATURE_TOLERANCE
@@ -1761,6 +1772,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         merged = {
             CONF_TARGET_TEMPERATURE: target_temperature,
             CONF_PRICE_COMFORT_WEIGHT: price_comfort_weight,
+            CONF_PRICE_PENALTY_CURVE: price_penalty_curve,
             CONF_CONTROL_INTERVAL_MINUTES: control_interval,
             CONF_PREDICTION_HORIZON_HOURS: prediction_horizon,
             CONF_COMFORT_TEMPERATURE_TOLERANCE: comfort_tolerance,

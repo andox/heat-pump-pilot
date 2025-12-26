@@ -32,6 +32,7 @@ from .const import (
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
+    CONF_PRICE_PENALTY_CURVE,
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
@@ -48,6 +49,7 @@ from .const import (
     DEFAULT_PERFORMANCE_WINDOW_HOURS,
     DEFAULT_PREDICTION_HORIZON_HOURS,
     DEFAULT_PRICE_COMFORT_WEIGHT,
+    DEFAULT_PRICE_PENALTY_CURVE,
     DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
@@ -63,6 +65,7 @@ from .const import (
     LEARNING_MODEL_EKF,
     LEARNING_MODEL_RLS,
     OVERSHOOT_WARM_BIAS_CURVES,
+    PRICE_PENALTY_CURVES,
     PERFORMANCE_WINDOW_OPTIONS,
 )
 
@@ -93,6 +96,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_COMFORT_TEMPERATURE_TOLERANCE: DEFAULT_COMFORT_TEMPERATURE_TOLERANCE,
                 CONF_MONITOR_ONLY: user_input.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+                CONF_PRICE_PENALTY_CURVE: DEFAULT_PRICE_PENALTY_CURVE,
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
                 CONF_OVERSHOOT_WARM_BIAS_CURVE: DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
                 CONF_HEAT_LOSS_COEFFICIENT: DEFAULT_HEAT_LOSS_COEFFICIENT,
@@ -227,6 +231,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_COMFORT_TEMPERATURE_TOLERANCE: user_input[CONF_COMFORT_TEMPERATURE_TOLERANCE],
                 CONF_MONITOR_ONLY: user_input[CONF_MONITOR_ONLY],
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: user_input[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET],
+                CONF_PRICE_PENALTY_CURVE: user_input.get(
+                    CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE
+                ),
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: user_input.get(
                     CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED
                 ),
@@ -388,6 +395,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         step=0.5,
                         unit_of_measurement="°C",
                         mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_PRICE_PENALTY_CURVE,
+                    default=options.get(CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(PRICE_PENALTY_CURVES),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
                 vol.Required(
