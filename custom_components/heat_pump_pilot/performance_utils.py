@@ -18,6 +18,7 @@ class PerformanceSample:
     heating_detected: bool | None
     price: float | None
     prediction_error: float | None
+    suggested_heat_on: bool | None = None
 
 
 def compute_comfort_score(samples: Iterable[PerformanceSample], tolerance: float) -> tuple[float | None, dict[str, Any]]:
@@ -113,3 +114,59 @@ def compute_prediction_accuracy(
         "last_error": errors[-1],
     }
     return mae, details
+
+
+def compute_curve_recommendation(
+    samples: Iterable[PerformanceSample],
+    *,
+    min_samples: int,
+    idle_ratio_threshold: float,
+    active_ratio_threshold: float,
+) -> tuple[str, dict[str, Any]]:
+    """Recommend curve adjustments based on heating detected vs MPC intent."""
+    idle_samples = 0
+    idle_heating = 0
+    active_samples = 0
+    active_heating = 0
+
+    for sample in samples:
+        if sample.suggested_heat_on is None or sample.heating_detected is None:
+            continue
+        if sample.suggested_heat_on:
+            active_samples += 1
+            if sample.heating_detected:
+                active_heating += 1
+        else:
+            idle_samples += 1
+            if sample.heating_detected:
+                idle_heating += 1
+
+    idle_ratio = (idle_heating / idle_samples) if idle_samples else None
+    active_ratio = (active_heating / active_samples) if active_samples else None
+    active_miss_ratio = ((active_samples - active_heating) / active_samples) if active_samples else None
+
+    recommendation = "insufficient_data"
+    if idle_samples >= min_samples or active_samples >= min_samples:
+        recommendation = "ok"
+        if idle_samples >= min_samples and idle_ratio is not None and idle_ratio >= idle_ratio_threshold:
+            recommendation = "lower_curve"
+        elif (
+            active_samples >= min_samples
+            and active_miss_ratio is not None
+            and active_miss_ratio >= active_ratio_threshold
+        ):
+            recommendation = "raise_curve"
+
+    details = {
+        "idle_samples": idle_samples,
+        "idle_heating_samples": idle_heating,
+        "idle_heating_ratio": idle_ratio,
+        "active_samples": active_samples,
+        "active_heating_samples": active_heating,
+        "active_heating_ratio": active_ratio,
+        "active_miss_ratio": active_miss_ratio,
+        "min_samples": min_samples,
+        "idle_ratio_threshold": idle_ratio_threshold,
+        "active_ratio_threshold": active_ratio_threshold,
+    }
+    return recommendation, details

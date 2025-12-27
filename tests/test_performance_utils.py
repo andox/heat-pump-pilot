@@ -15,6 +15,7 @@ if str(COMPONENT_ROOT) not in sys.path:
 from performance_utils import (  # noqa: E402
     PerformanceSample,
     compute_comfort_score,
+    compute_curve_recommendation,
     compute_prediction_accuracy,
     compute_price_score,
 )
@@ -57,3 +58,56 @@ def test_prediction_accuracy_metrics() -> None:
     assert details["bias"] == pytest.approx(0.0)
     assert details["max_abs_error"] == pytest.approx(1.0)
     assert details["last_error"] == pytest.approx(-1.0)
+
+
+def test_curve_recommendation_lower_curve_when_heating_while_idle() -> None:
+    now = datetime(2025, 12, 20, 12, 0, tzinfo=timezone.utc)
+    samples = [
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False),
+        PerformanceSample(now, 20.0, 20.0, False, 0.2, None, suggested_heat_on=False),
+    ]
+    recommendation, details = compute_curve_recommendation(
+        samples,
+        min_samples=4,
+        idle_ratio_threshold=0.5,
+        active_ratio_threshold=0.2,
+    )
+    assert recommendation == "lower_curve"
+    assert details["idle_heating_ratio"] == pytest.approx(0.75)
+
+
+def test_curve_recommendation_raise_curve_when_no_heating_on_request() -> None:
+    now = datetime(2025, 12, 20, 12, 0, tzinfo=timezone.utc)
+    samples = [
+        PerformanceSample(now, 20.0, 20.0, False, 0.2, None, suggested_heat_on=True),
+        PerformanceSample(now, 20.0, 20.0, False, 0.2, None, suggested_heat_on=True),
+        PerformanceSample(now, 20.0, 20.0, False, 0.2, None, suggested_heat_on=True),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=True),
+    ]
+    recommendation, details = compute_curve_recommendation(
+        samples,
+        min_samples=4,
+        idle_ratio_threshold=0.3,
+        active_ratio_threshold=0.2,
+    )
+    assert recommendation == "raise_curve"
+    assert details["active_heating_ratio"] == pytest.approx(0.25)
+
+
+def test_curve_recommendation_insufficient_data() -> None:
+    now = datetime(2025, 12, 20, 12, 0, tzinfo=timezone.utc)
+    samples = [
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=True),
+    ]
+    recommendation, details = compute_curve_recommendation(
+        samples,
+        min_samples=3,
+        idle_ratio_threshold=0.5,
+        active_ratio_threshold=0.2,
+    )
+    assert recommendation == "insufficient_data"
+    assert details["idle_samples"] == 1
+    assert details["active_samples"] == 1

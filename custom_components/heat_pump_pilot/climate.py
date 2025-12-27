@@ -91,7 +91,13 @@ from .forecast_utils import align_forecast_to_now, expand_to_steps, extract_time
 from .learning_utils import should_reseed_thermal_model
 from .mpc_controller import MpcController, ControlResult
 from .notification_utils import NotificationTracker, NotificationUpdate
-from .performance_utils import PerformanceSample, compute_comfort_score, compute_prediction_accuracy, compute_price_score
+from .performance_utils import (
+    PerformanceSample,
+    compute_comfort_score,
+    compute_curve_recommendation,
+    compute_prediction_accuracy,
+    compute_price_score,
+)
 from .performance_history import PerformanceHistoryStorage
 from .price_history import PriceHistoryStorage
 from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator, ThermalModelStorage
@@ -130,6 +136,9 @@ WEATHER_FORECAST_CACHE_SECONDS = 30 * 60
 WEATHER_FORECAST_SERVICE_TYPE = "hourly"
 # Keep enough samples for the largest window even at the smallest control interval (5 min).
 PERFORMANCE_HISTORY_MAX_ENTRIES = 96 * 12
+CURVE_RECOMMENDATION_MIN_SAMPLES = 8
+CURVE_IDLE_HEATING_HIGH_RATIO = 0.3
+CURVE_ACTIVE_HEATING_LOW_RATIO = 0.2
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
@@ -504,6 +513,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             heating_detected = entry.get("heating_detected")
             if heating_detected not in (None, True, False):
                 heating_detected = None
+            suggested_heat_on = entry.get("suggested_heat_on")
+            if suggested_heat_on not in (None, True, False):
+                suggested_heat_on = None
             price_raw = entry.get("price")
             prediction_raw = entry.get("prediction_error")
             try:
@@ -522,6 +534,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                     heating_detected=heating_detected,
                     price=price,
                     prediction_error=prediction_error,
+                    suggested_heat_on=suggested_heat_on,
                 )
             )
         if history:
@@ -546,6 +559,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                     "heating_detected": sample.heating_detected,
                     "price": sample.price,
                     "prediction_error": sample.prediction_error,
+                    "suggested_heat_on": sample.suggested_heat_on,
                 }
             )
         payload = {"version": 1, "history": serialized}
@@ -804,6 +818,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                 heating_detected=heating_detected,
                 price=current_price,
                 prediction_error=prediction_error,
+                suggested_heat_on=self._last_control_on,
             )
             self._publish_decision()
             await self._async_update_notifications(now)
@@ -1864,6 +1879,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         price_ratio_mpc, price_classification_mpc = self._classify_price()
         health, health_reasons = self._compute_health(now)
         learning_state, learning_details = self._compute_learning_state(now)
+        curve_recommendation, curve_details = self._compute_curve_recommendation(now)
         heating_detected = self._get_heating_detected(now)
         overshoot_bias, overshoot_warm_bias_multiplier, overshoot_min_bias, overshoot_max_bias = (
             self._comfort_overshoot_multiplier()
@@ -1926,6 +1942,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             "health_reasons": health_reasons,
             "learning_state": learning_state,
             "learning_details": learning_details,
+            "curve_recommendation": curve_recommendation,
+            "curve_recommendation_details": curve_details,
             "heating_detected": heating_detected,
             "heating_detected_source": heating_detected_source,
             "heating_supply_temp_entity": self._heating_supply_temp_entity,
@@ -2468,6 +2486,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         heating_detected: bool | None,
         price: float | None,
         prediction_error: float | None,
+        suggested_heat_on: bool | None,
     ) -> None:
         """Store a performance sample for scoring."""
         try:
@@ -2486,6 +2505,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             heating_detected=heating_detected,
             price=price,
             prediction_error=prediction_error,
+            suggested_heat_on=suggested_heat_on,
         )
         self._performance_history.append(sample)
         if len(self._performance_history) > PERFORMANCE_HISTORY_MAX_ENTRIES:
@@ -2518,3 +2538,20 @@ class MpcHeatPumpClimate(ClimateEntity):
             "prediction_mae": prediction_mae,
             "prediction_details": prediction_details,
         }
+
+    def _compute_curve_recommendation(self, now) -> tuple[str, dict[str, Any]]:
+        """Compute a curve recommendation using the performance window."""
+        window_hours = self._performance_window_hours
+        try:
+            cutoff = dt_util.as_utc(now) - timedelta(hours=window_hours)
+        except (TypeError, ValueError):
+            cutoff = dt_util.utcnow() - timedelta(hours=window_hours)
+        samples = [sample for sample in self._performance_history if sample.when >= cutoff]
+        recommendation, details = compute_curve_recommendation(
+            samples,
+            min_samples=CURVE_RECOMMENDATION_MIN_SAMPLES,
+            idle_ratio_threshold=CURVE_IDLE_HEATING_HIGH_RATIO,
+            active_ratio_threshold=CURVE_ACTIVE_HEATING_LOW_RATIO,
+        )
+        details["window_hours"] = window_hours
+        return recommendation, details

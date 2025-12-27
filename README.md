@@ -208,6 +208,8 @@ Key diagnostic sensors:
   `overshoot_warm_bias_min_bias`, `overshoot_warm_bias_max_bias`,
   `overshoot_warm_bias_applied`, and `overshoot_warm_bias_multiplier`.
 - Heat Pump Pilot Health: overall health with reasons (missing sensors, stale control, etc).
+- Curve recommendation (Health attribute): suggests when to raise/lower the heat pump curve
+  based on heating detected during idle vs requested heating over the performance window.
 - Heat Pump Pilot Control State: whether the integration is controlling or monitoring.
 - Heat Pump Pilot Learning State: learning vs stable, with change ratios and window stats.
 - Heat Pump Pilot Price State: current price classification and baseline details.
@@ -310,6 +312,14 @@ cards:
         secondary_info: last-changed
       - entity: sensor.heat_pump_pilot_health
         secondary_info: last-changed
+      - type: attribute
+        entity: sensor.heat_pump_pilot_health
+        attribute: curve_recommendation
+        name: Curve recommendation
+      - type: attribute
+        entity: sensor.heat_pump_pilot_health
+        attribute: curve_recommendation_details
+        name: Curve recommendation details
       - entity: sensor.heat_pump_pilot_control_state
         secondary_info: last-changed
       - entity: sensor.heat_pump_pilot_learning_state

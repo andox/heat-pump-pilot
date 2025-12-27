@@ -157,6 +157,8 @@ class MpcHeatPumpHealthSensor(_MpcHeatPumpBaseSensor):
             "last_control_time": self._decision.get("last_control_time"),
             "control_state": self._decision.get("control_state"),
             "learning_state": self._decision.get("learning_state"),
+            "curve_recommendation": self._decision.get("curve_recommendation"),
+            "curve_recommendation_details": self._decision.get("curve_recommendation_details"),
         }
 
 
@@ -346,6 +348,7 @@ class MpcHeatPumpPredictionAccuracySensor(_MpcHeatPumpPerformanceSensor):
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:target"
+    _attr_suggested_display_precision = 2
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
