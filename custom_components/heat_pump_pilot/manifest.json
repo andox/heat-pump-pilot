@@ -7,6 +7,10 @@
   "requirements": [],
   "dependencies": [],
   "integration_type": "service",
+  "codeowners": [
+    "@andox"
+  ],
+  "issue_tracker": "https://github.com/andox/heat-pump-pilot/issues",
   "config_flow": true,
   "iot_class": "calculated"
 }
