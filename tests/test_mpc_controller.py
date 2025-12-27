@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mpc_controller import MpcController
+from mpc_controller import MpcController, PRICE_BASELINE_FLOOR
 
 
 def test_mpc_does_not_heat_when_comfort_already_satisfied() -> None:
@@ -217,6 +217,26 @@ def test_price_comfort_weight_changes_optimal_first_action() -> None:
     )
     action_price, _ = price_first.suggest_control(indoor_temp, outdoor_forecast, price_forecast)
     assert action_price is False
+
+
+def test_negative_prices_are_bounded_in_cost() -> None:
+    """Negative prices should incentivize heating without unbounded cost."""
+    controller = MpcController(
+        target_temperature=20.0,
+        price_comfort_weight=1.0,
+        comfort_temperature_tolerance=0.0,
+        prediction_horizon_hours=2,
+        time_step_hours=1.0,
+        heat_loss_coeff=0.0,
+        heat_gain_coeff=0.0,
+    )
+    prices = [-1000.0, -1000.0]
+    outdoor = [20.0, 20.0]
+    decision, result = controller.suggest_control(20.0, outdoor, prices)
+    assert result is not None
+    assert decision is True
+    assert result.price_baseline == PRICE_BASELINE_FLOOR
+    assert result.cost == -2.0
 
 
 def test_overshoot_bias_increases_above_target_penalty() -> None:

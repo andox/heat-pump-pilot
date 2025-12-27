@@ -732,6 +732,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             return
         self._hvac_mode = hvac_mode
         if hvac_mode == HVACMode.OFF:
+            self._last_virtual_outdoor = self._compute_off_virtual_outdoor()
             await self._apply_control(False)
         else:
             await self._async_run_control()
@@ -1414,6 +1415,15 @@ class MpcHeatPumpClimate(ClimateEntity):
 
         # Never send a virtual outdoor warmer than 25C (summer/no heat).
         return min(value, MAX_VIRTUAL_OUTDOOR)
+
+    def _compute_off_virtual_outdoor(self) -> float | None:
+        """Compute a neutral virtual outdoor temperature when HVAC is OFF."""
+        base = self._outdoor_temp if self._outdoor_temp is not None else self._get_state_as_float(
+            self._outdoor_temp_entity
+        )
+        if base is None:
+            base = VIRTUAL_OUTDOOR_IDLE_FALLBACK
+        return min(base, MAX_VIRTUAL_OUTDOOR)
 
     async def _async_build_outdoor_forecast(self, now) -> list[float]:
         """Collect outdoor temperature forecast.
@@ -2320,6 +2330,8 @@ class MpcHeatPumpClimate(ClimateEntity):
     def _update_price_history(self, now, price_forecast: list[float]) -> None:
         """Maintain a simple rolling history of observed prices for baseline comparisons."""
         if not price_forecast:
+            return
+        if self._last_price_forecast_source in {"unavailable", "empty", "current_price_only"}:
             return
         current_price = price_forecast[0]
         if current_price is None:

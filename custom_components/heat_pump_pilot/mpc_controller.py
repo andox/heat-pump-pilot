@@ -32,6 +32,9 @@ TIME_STEP_HOURS = 0.25
 TEMP_RESOLUTION = 0.02
 # Small penalty for actuator toggling.
 TOGGLE_PENALTY = 0.01
+# Keep price ratios bounded when prices dip below zero.
+PRICE_BASELINE_FLOOR = 0.01
+PRICE_RATIO_MIN = -1.0
 
 
 @dataclass
@@ -132,13 +135,13 @@ class MpcController:
         prices = self._normalize_series(price_forecast, steps, 1.0)
 
         max_price = max(prices) if prices else 1.0
-        baseline_pool = list(prices)
+        baseline_pool = [p for p in prices if p is not None and p > 0]
         if past_prices:
-            baseline_pool.extend(p for p in past_prices if p is not None)
+            baseline_pool.extend(p for p in past_prices if p is not None and p > 0)
         median_price = median(baseline_pool) if baseline_pool else max_price
         if median_price <= 0:
-            median_price = max_price
-        price_baseline = median_price
+            median_price = PRICE_BASELINE_FLOOR
+        price_baseline = max(median_price, PRICE_BASELINE_FLOOR)
 
         sequence, cost = self._optimize(indoor_temp, outdoor, prices, price_baseline, max_price)
         predicted = self._simulate_sequence(indoor_temp, outdoor, sequence)
@@ -210,8 +213,9 @@ class MpcController:
                 comfort_penalty = self._comfort_penalty(temp)
                 # Penalize heating relative to the (median) baseline price.
                 # Using max_price here would squash the relative differences we care about.
-                baseline_denom = max(price_baseline, 1e-6)
+                baseline_denom = max(price_baseline, PRICE_BASELINE_FLOOR)
                 price_ratio = current_price / baseline_denom
+                price_ratio = max(PRICE_RATIO_MIN, price_ratio)
                 price_penalty = self._apply_price_penalty_curve(price_ratio)
                 price_cost = self.price_comfort_weight * price_penalty * heat_power * self.time_step_hours
                 comfort_cost = (1.0 - self.price_comfort_weight) * comfort_penalty * self.time_step_hours
