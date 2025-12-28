@@ -62,6 +62,7 @@ Core control:
 - Target temperature (default: 21.0°C): your comfort setpoint; set to your normal desired indoor temp.
 - Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.7-0.95.
 - Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
+- Price baseline window (default: 24 h): how much recent observed history is used alongside forecasts when scaling prices (24/48/72 h).
 - Control interval (default: 15 min): how often MPC runs; keep 15-30 min unless you have slow sensors.
 - Prediction horizon (default: 24 h): MPC planning horizon; 12-24 h is typical.
 - Comfort tolerance (default: 1.0°C): deadband before comfort penalty; 0.5-1.5°C is typical.
@@ -164,10 +165,11 @@ Learning state uses a rolling 6-hour window of model history:
 - If no heat signal is available, learning is **disabled**.
 
 ## Price baseline and classification
-Two baselines are used:
-- **MPC baseline**: median of `price_forecast + price_history`.
-- **History baseline (24h)**: median of the last 24h of stored price history
-  (requires at least 16 samples).
+The integration uses a single baseline for both MPC and classification:
+- **Unified baseline**: median of `price_forecast + price_history_window`, where
+  `price_history_window` is the last 24/48/72 hours of observed prices.
+  Non-positive prices are ignored and a small floor is used to avoid skew.
+The window length is controlled by **Price baseline window** in the options flow.
 
 Price-aware penalties only apply when `price_ratio > 1.0` (current price above baseline).
 The ratio is capped (default `3.0`) before applying the curve, and all curves are

@@ -10,9 +10,21 @@ from statistics import median
 from typing import Iterable, Sequence
 
 try:
-    from .const import DEFAULT_PRICE_PENALTY_CURVE, DEFAULT_PRICE_RATIO_CAP, PRICE_PENALTY_CURVES
+    from .const import (
+        DEFAULT_PRICE_PENALTY_CURVE,
+        DEFAULT_PRICE_RATIO_CAP,
+        PRICE_BASELINE_FLOOR,
+        PRICE_PENALTY_CURVES,
+        PRICE_RATIO_MIN,
+    )
 except ImportError:  # pragma: no cover - allow direct module imports in tests
-    from const import DEFAULT_PRICE_PENALTY_CURVE, DEFAULT_PRICE_RATIO_CAP, PRICE_PENALTY_CURVES
+    from const import (  # type: ignore
+        DEFAULT_PRICE_PENALTY_CURVE,
+        DEFAULT_PRICE_RATIO_CAP,
+        PRICE_BASELINE_FLOOR,
+        PRICE_PENALTY_CURVES,
+        PRICE_RATIO_MIN,
+    )
 try:
     from .virtual_outdoor_utils import compute_overshoot_warm_bias
 except ImportError:  # pragma: no cover - allow direct module imports in tests
@@ -32,9 +44,6 @@ TIME_STEP_HOURS = 0.25
 TEMP_RESOLUTION = 0.02
 # Small penalty for actuator toggling.
 TOGGLE_PENALTY = 0.01
-# Keep price ratios bounded when prices dip below zero.
-PRICE_BASELINE_FLOOR = 0.01
-PRICE_RATIO_MIN = -1.0
 
 
 @dataclass
@@ -128,6 +137,7 @@ class MpcController:
         outdoor_forecast: Sequence[float],
         price_forecast: Sequence[float],
         past_prices: Sequence[float] | None = None,
+        price_baseline_override: float | None = None,
     ) -> tuple[bool, ControlResult | None]:
         """Return the recommended control action and the best simulation result."""
         steps = max(1, int(self.prediction_horizon_hours / self.time_step_hours))
@@ -135,13 +145,20 @@ class MpcController:
         prices = self._normalize_series(price_forecast, steps, 1.0)
 
         max_price = max(prices) if prices else 1.0
-        baseline_pool = [p for p in prices if p is not None and p > 0]
-        if past_prices:
-            baseline_pool.extend(p for p in past_prices if p is not None and p > 0)
-        median_price = median(baseline_pool) if baseline_pool else max_price
-        if median_price <= 0:
-            median_price = PRICE_BASELINE_FLOOR
-        price_baseline = max(median_price, PRICE_BASELINE_FLOOR)
+        price_baseline = None
+        if price_baseline_override is not None:
+            try:
+                price_baseline = float(price_baseline_override)
+            except (TypeError, ValueError):
+                price_baseline = None
+        if price_baseline is None or price_baseline <= 0:
+            baseline_pool = [p for p in prices if p is not None and p > 0]
+            if past_prices:
+                baseline_pool.extend(p for p in past_prices if p is not None and p > 0)
+            median_price = median(baseline_pool) if baseline_pool else max_price
+            if median_price <= 0:
+                median_price = PRICE_BASELINE_FLOOR
+            price_baseline = max(median_price, PRICE_BASELINE_FLOOR)
 
         sequence, cost = self._optimize(indoor_temp, outdoor, prices, price_baseline, max_price)
         predicted = self._simulate_sequence(indoor_temp, outdoor, sequence)

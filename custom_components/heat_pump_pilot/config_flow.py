@@ -32,6 +32,7 @@ from .const import (
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
+    CONF_PRICE_BASELINE_WINDOW_HOURS,
     CONF_PRICE_PENALTY_CURVE,
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
@@ -50,6 +51,7 @@ from .const import (
     DEFAULT_PREDICTION_HORIZON_HOURS,
     DEFAULT_PRICE_COMFORT_WEIGHT,
     DEFAULT_PRICE_PENALTY_CURVE,
+    DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
     DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
@@ -66,6 +68,7 @@ from .const import (
     LEARNING_MODEL_RLS,
     OVERSHOOT_WARM_BIAS_CURVES,
     PRICE_PENALTY_CURVES,
+    PRICE_BASELINE_WINDOW_OPTIONS,
     PERFORMANCE_WINDOW_OPTIONS,
 )
 
@@ -97,6 +100,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_MONITOR_ONLY: user_input.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
                 CONF_PRICE_PENALTY_CURVE: DEFAULT_PRICE_PENALTY_CURVE,
+                CONF_PRICE_BASELINE_WINDOW_HOURS: DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
                 CONF_OVERSHOOT_WARM_BIAS_CURVE: DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
                 CONF_HEAT_LOSS_COEFFICIENT: DEFAULT_HEAT_LOSS_COEFFICIENT,
@@ -234,6 +238,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_PRICE_PENALTY_CURVE: user_input.get(
                     CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE
                 ),
+                CONF_PRICE_BASELINE_WINDOW_HOURS: user_input.get(
+                    CONF_PRICE_BASELINE_WINDOW_HOURS, DEFAULT_PRICE_BASELINE_WINDOW_HOURS
+                ),
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: user_input.get(
                     CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED
                 ),
@@ -330,6 +337,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         max=1,
                         step=0.05,
                         mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Required(
+                    CONF_PRICE_BASELINE_WINDOW_HOURS,
+                    default=str(options.get(CONF_PRICE_BASELINE_WINDOW_HOURS, DEFAULT_PRICE_BASELINE_WINDOW_HOURS)),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[str(value) for value in PRICE_BASELINE_WINDOW_OPTIONS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
                 vol.Required(

@@ -8,7 +8,6 @@ from datetime import timedelta
 import logging
 import inspect
 from functools import partial
-from statistics import median
 from typing import Any, Iterable, Sequence
 
 from homeassistant.components.climate import (
@@ -50,6 +49,7 @@ from .const import (
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
     CONF_PRICE_PENALTY_CURVE,
+    CONF_PRICE_BASELINE_WINDOW_HOURS,
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
@@ -73,6 +73,7 @@ from .const import (
     DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
     DEFAULT_PRICE_COMFORT_WEIGHT,
     DEFAULT_PRICE_PENALTY_CURVE,
+    DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
     DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
@@ -82,6 +83,8 @@ from .const import (
     LEARNING_MODEL_EKF,
     LEARNING_MODEL_RLS,
     OVERSHOOT_WARM_BIAS_CURVES,
+    PRICE_BASELINE_FLOOR,
+    PRICE_BASELINE_WINDOW_OPTIONS,
     PRICE_PENALTY_CURVES,
     PERFORMANCE_WINDOW_OPTIONS,
     SIGNAL_DECISION_UPDATED,
@@ -100,6 +103,7 @@ from .performance_utils import (
 )
 from .performance_history import PerformanceHistoryStorage
 from .price_history import PriceHistoryStorage
+from .price_utils import classify_price, compute_price_baseline
 from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator, ThermalModelStorage
 from .virtual_outdoor_utils import compute_overshoot_warm_bias, compute_planned_virtual_outdoor_temperatures
 
@@ -167,6 +171,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._target_temperature: float = self._options[CONF_TARGET_TEMPERATURE]
         self._price_comfort_weight: float = self._options[CONF_PRICE_COMFORT_WEIGHT]
         self._price_penalty_curve: str = self._options[CONF_PRICE_PENALTY_CURVE]
+        self._price_baseline_window_hours: int = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
         self._control_interval: int = self._options[CONF_CONTROL_INTERVAL_MINUTES]
         self._prediction_horizon: int = self._options[CONF_PREDICTION_HORIZON_HOURS]
         self._comfort_tolerance: float = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
@@ -234,6 +239,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._last_outdoor_forecast: list[float] = []
         self._last_price_forecast_source: str = "unavailable"
         self._last_outdoor_forecast_source: str = "unavailable"
+        self._last_price_baseline_details: dict[str, int] = {}
         self._last_virtual_outdoor: float | None = None
         self._price_history: list[float] = []
         self._last_price_bucket_start = None
@@ -648,10 +654,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             current_price = float(current_price_raw) if current_price_raw is not None else None
         except (TypeError, ValueError):
             current_price = None
-        history_baseline_24h, history_samples_24h = self._history_price_baseline(24)
-        price_ratio_history_24h, price_classification_history_24h = self._classify_price_against_baseline(
-            current_price, history_baseline_24h
-        )
+        baseline_details = dict(self._last_price_baseline_details or {})
         heating_detected = self._get_heating_detected(dt_util.utcnow())
         nominal_heat_power_kw = NOMINAL_HEAT_POWER_KW
         time_step_hours = self._controller.time_step_hours
@@ -676,11 +679,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             "current_price": current_price,
             "price_ratio": price_ratio_mpc,
             "price_classification": price_classification_mpc,
-            "price_baseline_kind": "median(price_forecast + price_history)",
-            "price_baseline_history_24h": history_baseline_24h,
-            "price_baseline_history_24h_samples": history_samples_24h,
-            "price_ratio_history_24h": price_ratio_history_24h,
-            "price_classification_history_24h": price_classification_history_24h,
+            "price_baseline_kind": "median(price_forecast + price_history_window)",
+            "price_baseline_window_hours": self._price_baseline_window_hours,
+            "price_baseline_history_samples": baseline_details.get("history_samples"),
+            "price_baseline_forecast_samples": baseline_details.get("forecast_samples"),
             "monitor_only": self._monitor_only,
             "virtual_outdoor_heat_offset": self._virtual_heat_offset,
             "heat_loss_coefficient": self._heat_loss_coeff,
@@ -783,6 +785,13 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._update_thermal_model(now, indoor_temp, self._outdoor_temp)
             steps = max(1, int(self._prediction_horizon / self._controller.time_step_hours))
             price_forecast = self._extract_price_forecast(now)
+            baseline, baseline_details = compute_price_baseline(
+                history=self._price_history,
+                forecast=price_forecast,
+                time_step_hours=self._controller.time_step_hours,
+                window_hours=self._price_baseline_window_hours,
+                baseline_floor=PRICE_BASELINE_FLOOR,
+            )
             outdoor_forecast = await self._async_build_outdoor_forecast(now)
 
             price_expanded = expand_to_steps(price_forecast, steps, self._controller.time_step_hours)
@@ -790,13 +799,15 @@ class MpcHeatPumpClimate(ClimateEntity):
             outdoor_for_mpc = expand_to_steps(outdoor_forecast, steps, self._controller.time_step_hours)
             self._last_price_forecast = price_for_mpc
             self._last_outdoor_forecast = outdoor_for_mpc
+            self._last_price_baseline_details = baseline_details
             self._update_price_history(now, price_for_mpc)
 
             decision, result = self._controller.suggest_control(
                 indoor_temp=indoor_temp,
                 outdoor_forecast=outdoor_for_mpc,
                 price_forecast=price_for_mpc,
-                past_prices=self._price_history,
+                past_prices=None,
+                price_baseline_override=baseline,
             )
             self._last_result = result
             self._last_virtual_outdoor = self._compute_virtual_outdoor(decision, outdoor_for_mpc)
@@ -1144,6 +1155,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._target_temperature = self._options[CONF_TARGET_TEMPERATURE]
         self._price_comfort_weight = self._options[CONF_PRICE_COMFORT_WEIGHT]
         self._price_penalty_curve = self._options[CONF_PRICE_PENALTY_CURVE]
+        self._price_baseline_window_hours = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
         self._control_interval = self._options[CONF_CONTROL_INTERVAL_MINUTES]
         self._prediction_horizon = self._options[CONF_PREDICTION_HORIZON_HOURS]
         self._comfort_tolerance = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
@@ -1762,6 +1774,16 @@ class MpcHeatPumpClimate(ClimateEntity):
         if price_penalty_curve not in PRICE_PENALTY_CURVES:
             price_penalty_curve = DEFAULT_PRICE_PENALTY_CURVE
 
+        price_baseline_window = options.get(
+            CONF_PRICE_BASELINE_WINDOW_HOURS, DEFAULT_PRICE_BASELINE_WINDOW_HOURS
+        )
+        try:
+            price_baseline_window = int(price_baseline_window)
+        except (TypeError, ValueError):
+            price_baseline_window = DEFAULT_PRICE_BASELINE_WINDOW_HOURS
+        if price_baseline_window not in PRICE_BASELINE_WINDOW_OPTIONS:
+            price_baseline_window = DEFAULT_PRICE_BASELINE_WINDOW_HOURS
+
         comfort_tolerance = self._state_to_float(options.get(CONF_COMFORT_TEMPERATURE_TOLERANCE))
         if comfort_tolerance is None:
             comfort_tolerance = DEFAULT_COMFORT_TEMPERATURE_TOLERANCE
@@ -1798,6 +1820,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             CONF_TARGET_TEMPERATURE: target_temperature,
             CONF_PRICE_COMFORT_WEIGHT: price_comfort_weight,
             CONF_PRICE_PENALTY_CURVE: price_penalty_curve,
+            CONF_PRICE_BASELINE_WINDOW_HOURS: price_baseline_window,
             CONF_CONTROL_INTERVAL_MINUTES: control_interval,
             CONF_PREDICTION_HORIZON_HOURS: prediction_horizon,
             CONF_COMFORT_TEMPERATURE_TOLERANCE: comfort_tolerance,
@@ -1889,10 +1912,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             current_price = float(current_price_raw) if current_price_raw is not None else None
         except (TypeError, ValueError):
             current_price = None
-        history_baseline_24h, history_samples_24h = self._history_price_baseline(24)
-        price_ratio_history_24h, price_classification_history_24h = self._classify_price_against_baseline(
-            current_price, history_baseline_24h
-        )
+        baseline_details = dict(self._last_price_baseline_details or {})
         heating_supply_temperature = (
             self._get_state_as_float(self._heating_supply_temp_entity) if self._heating_supply_temp_entity else None
         )
@@ -1969,11 +1989,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             "current_price": current_price,
             "price_ratio": price_ratio_mpc,
             "price_classification": price_classification_mpc,
-            "price_baseline_kind": "median(price_forecast + price_history)",
-            "price_baseline_history_24h": history_baseline_24h,
-            "price_baseline_history_24h_samples": history_samples_24h,
-            "price_ratio_history_24h": price_ratio_history_24h,
-            "price_classification_history_24h": price_classification_history_24h,
+            "price_baseline_kind": "median(price_forecast + price_history_window)",
+            "price_baseline_window_hours": self._price_baseline_window_hours,
+            "price_baseline_history_samples": baseline_details.get("history_samples"),
+            "price_baseline_forecast_samples": baseline_details.get("forecast_samples"),
             "cost": self._last_result.cost if self._last_result else None,
             "predicted_temperatures": self._last_result.predicted_temperatures if self._last_result else None,
             "price_forecast": self._last_price_forecast,
@@ -2376,51 +2395,6 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._price_history = self._price_history[-PRICE_HISTORY_MAX_ENTRIES:]
         self.hass.async_create_task(self._persist_price_history())
 
-    @staticmethod
-    def _price_label_from_ratio(ratio: float) -> str:
-        """Map a price ratio to a human-friendly category."""
-        if ratio < 0.75:
-            return "very_low"
-        if ratio < 0.9:
-            return "low"
-        if ratio < 1.1:
-            return "normal"
-        if ratio < 1.3:
-            return "high"
-        if ratio < 1.6:
-            return "very_high"
-        return "extreme"
-
-    @classmethod
-    def _classify_price_against_baseline(
-        cls, current_price: float | None, baseline: float | None
-    ) -> tuple[float | None, str | None]:
-        """Classify a price against a given baseline."""
-        if current_price is None or baseline is None:
-            return None, None
-        if baseline <= 0:
-            return None, None
-        ratio = current_price / baseline
-        return ratio, cls._price_label_from_ratio(ratio)
-
-    def _history_price_baseline(self, lookback_hours: int) -> tuple[float | None, int]:
-        """Compute a median baseline from the stored observed price history."""
-        if lookback_hours <= 0:
-            return None, 0
-        steps_per_hour = int(round(1 / self._controller.time_step_hours)) or 1
-        max_samples = lookback_hours * steps_per_hour
-        samples = self._price_history[-max_samples:] if max_samples > 0 else []
-        if len(samples) < PRICE_HISTORY_BACKFILL_MIN_SAMPLES:
-            return None, len(samples)
-        baseline = median(samples)
-        try:
-            baseline_value = float(baseline)
-        except (TypeError, ValueError):
-            return None, len(samples)
-        if baseline_value <= 0:
-            return None, len(samples)
-        return baseline_value, len(samples)
-
     def _classify_price(self) -> tuple[float | None, str | None]:
         """Classify current price relative to the MPC baseline used for optimization."""
         current_raw = self._last_price_forecast[0] if self._last_price_forecast else None
@@ -2433,7 +2407,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             baseline = float(baseline_raw) if baseline_raw is not None else None
         except (TypeError, ValueError):
             baseline = None
-        return self._classify_price_against_baseline(current, baseline)
+        return classify_price(current, baseline)
 
     def _thermal_model_heat_on_source(self) -> str:
         """Expose what heat-on signal (if any) drives the estimator."""

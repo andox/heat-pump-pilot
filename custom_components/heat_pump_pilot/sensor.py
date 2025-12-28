@@ -231,7 +231,7 @@ class MpcHeatPumpPriceStateSensor(_MpcHeatPumpBaseSensor):
     def native_value(self) -> str | None:
         if not self._decision:
             return None
-        return self._decision.get("price_classification_history_24h") or self._decision.get("price_classification")
+        return self._decision.get("price_classification")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -242,10 +242,9 @@ class MpcHeatPumpPriceStateSensor(_MpcHeatPumpBaseSensor):
             "price_baseline": self._decision.get("price_baseline"),
             "price_ratio": self._decision.get("price_ratio"),
             "price_baseline_kind": self._decision.get("price_baseline_kind"),
-            "price_baseline_history_24h": self._decision.get("price_baseline_history_24h"),
-            "price_baseline_history_24h_samples": self._decision.get("price_baseline_history_24h_samples"),
-            "price_ratio_history_24h": self._decision.get("price_ratio_history_24h"),
-            "price_classification_history_24h": self._decision.get("price_classification_history_24h"),
+            "price_baseline_window_hours": self._decision.get("price_baseline_window_hours"),
+            "price_baseline_history_samples": self._decision.get("price_baseline_history_samples"),
+            "price_baseline_forecast_samples": self._decision.get("price_baseline_forecast_samples"),
         }
 
 

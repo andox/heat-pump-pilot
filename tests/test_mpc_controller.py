@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from mpc_controller import MpcController, PRICE_BASELINE_FLOOR
+from const import PRICE_BASELINE_FLOOR
+from mpc_controller import MpcController
 
 
 def test_mpc_does_not_heat_when_comfort_already_satisfied() -> None:
