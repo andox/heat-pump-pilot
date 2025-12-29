@@ -11,6 +11,7 @@ if str(COMPONENT_ROOT) not in sys.path:
     sys.path.insert(0, str(COMPONENT_ROOT))
 
 from virtual_outdoor_utils import (  # noqa: E402
+    compute_continuous_virtual_outdoor,
     compute_overshoot_warm_bias,
     compute_planned_virtual_outdoor_temperatures,
 )
@@ -104,3 +105,63 @@ def test_overshoot_warm_bias_curves_shape() -> None:
     assert bias_linear == max_bias
     assert min_bias < bias_quadratic < bias_linear
     assert bias_sqrt > bias_quadratic
+
+
+def test_continuous_virtual_outdoor_bounds() -> None:
+    value_idle = compute_continuous_virtual_outdoor(
+        10.0,
+        0.0,
+        virtual_heat_offset=5.0,
+        price=None,
+        price_baseline=None,
+        price_comfort_weight=0.5,
+        predicted_temp=None,
+        target_temperature=None,
+        comfort_temperature_tolerance=0.5,
+    )
+    value_mid = compute_continuous_virtual_outdoor(
+        10.0,
+        0.5,
+        virtual_heat_offset=5.0,
+        price=None,
+        price_baseline=None,
+        price_comfort_weight=0.5,
+        predicted_temp=None,
+        target_temperature=None,
+        comfort_temperature_tolerance=0.5,
+    )
+    value_full = compute_continuous_virtual_outdoor(
+        10.0,
+        1.0,
+        virtual_heat_offset=5.0,
+        price=None,
+        price_baseline=None,
+        price_comfort_weight=0.5,
+        predicted_temp=None,
+        target_temperature=None,
+        comfort_temperature_tolerance=0.5,
+    )
+    assert value_idle == 15.0
+    assert value_mid == 10.0
+    assert value_full == 5.0
+
+
+def test_planned_virtual_outdoor_continuous_mode() -> None:
+    planned = compute_planned_virtual_outdoor_temperatures(
+        [True, False, False, True],
+        outdoor_forecast=[0.0, 0.0, 0.0, 0.0],
+        price_forecast=[1.0, 1.0, 1.0, 1.0],
+        predicted_temperatures=[20.0, 20.0, 20.0, 20.0],
+        base_outdoor_fallback=0.0,
+        virtual_heat_offset=4.0,
+        price_comfort_weight=0.0,
+        price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
+        target_temperature=20.0,
+        overshoot_warm_bias_enabled=False,
+        continuous_control_enabled=True,
+        continuous_control_window_steps=2,
+    )
+    assert planned is not None
+    assert planned[0] == 0.0
+    assert planned[1] == 4.0

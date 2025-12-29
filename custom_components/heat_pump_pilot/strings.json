@@ -28,6 +28,8 @@
           "target_temperature": "Target indoor temperature",
           "price_comfort_weight": "Price vs comfort weight",
           "price_baseline_window_hours": "Price baseline window (hours)",
+          "continuous_control_enabled": "Enable continuous control mode",
+          "continuous_control_window_hours": "Continuous control window (hours)",
           "control_interval_minutes": "Control interval (minutes)",
           "prediction_horizon_hours": "Prediction horizon (hours)",
           "comfort_temperature_tolerance": "Comfort tolerance (°C)",

@@ -50,6 +50,8 @@ from .const import (
     CONF_PRICE_ENTITY,
     CONF_PRICE_PENALTY_CURVE,
     CONF_PRICE_BASELINE_WINDOW_HOURS,
+    CONF_CONTINUOUS_CONTROL_ENABLED,
+    CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
@@ -74,6 +76,8 @@ from .const import (
     DEFAULT_PRICE_COMFORT_WEIGHT,
     DEFAULT_PRICE_PENALTY_CURVE,
     DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
+    DEFAULT_CONTINUOUS_CONTROL_ENABLED,
+    DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
     DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
@@ -85,6 +89,7 @@ from .const import (
     OVERSHOOT_WARM_BIAS_CURVES,
     PRICE_BASELINE_FLOOR,
     PRICE_BASELINE_WINDOW_OPTIONS,
+    CONTINUOUS_CONTROL_WINDOW_OPTIONS,
     PRICE_PENALTY_CURVES,
     PERFORMANCE_WINDOW_OPTIONS,
     SIGNAL_DECISION_UPDATED,
@@ -105,7 +110,12 @@ from .performance_history import PerformanceHistoryStorage
 from .price_history import PriceHistoryStorage
 from .price_utils import classify_price, compute_price_baseline
 from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator, ThermalModelStorage
-from .virtual_outdoor_utils import compute_overshoot_warm_bias, compute_planned_virtual_outdoor_temperatures
+from .virtual_outdoor_utils import (
+    compute_continuous_virtual_outdoor,
+    compute_duty_ratio,
+    compute_overshoot_warm_bias,
+    compute_planned_virtual_outdoor_temperatures,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -172,6 +182,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._price_comfort_weight: float = self._options[CONF_PRICE_COMFORT_WEIGHT]
         self._price_penalty_curve: str = self._options[CONF_PRICE_PENALTY_CURVE]
         self._price_baseline_window_hours: int = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
+        self._continuous_control_enabled: bool = self._options[CONF_CONTINUOUS_CONTROL_ENABLED]
+        self._continuous_control_window_hours: float = self._options[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS]
         self._control_interval: int = self._options[CONF_CONTROL_INTERVAL_MINUTES]
         self._prediction_horizon: int = self._options[CONF_PREDICTION_HORIZON_HOURS]
         self._comfort_tolerance: float = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
@@ -240,6 +252,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._last_price_forecast_source: str = "unavailable"
         self._last_outdoor_forecast_source: str = "unavailable"
         self._last_price_baseline_details: dict[str, int] = {}
+        self._last_duty_ratio: float | None = None
+        self._last_virtual_outdoor_shift: float | None = None
         self._last_virtual_outdoor: float | None = None
         self._price_history: list[float] = []
         self._last_price_bucket_start = None
@@ -683,6 +697,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             "price_baseline_window_hours": self._price_baseline_window_hours,
             "price_baseline_history_samples": baseline_details.get("history_samples"),
             "price_baseline_forecast_samples": baseline_details.get("forecast_samples"),
+            "continuous_control_enabled": self._continuous_control_enabled,
+            "continuous_control_window_hours": self._continuous_control_window_hours,
+            "continuous_control_duty_ratio": self._last_duty_ratio,
+            "continuous_control_virtual_outdoor_shift": self._last_virtual_outdoor_shift,
             "monitor_only": self._monitor_only,
             "virtual_outdoor_heat_offset": self._virtual_heat_offset,
             "heat_loss_coefficient": self._heat_loss_coeff,
@@ -810,7 +828,14 @@ class MpcHeatPumpClimate(ClimateEntity):
                 price_baseline_override=baseline,
             )
             self._last_result = result
-            self._last_virtual_outdoor = self._compute_virtual_outdoor(decision, outdoor_for_mpc)
+            duty_ratio = None
+            if self._continuous_control_enabled and result and result.sequence:
+                window_steps = self._continuous_control_window_steps()
+                duty_ratio = compute_duty_ratio(result.sequence, 0, window_steps)
+            self._last_duty_ratio = duty_ratio
+            self._last_virtual_outdoor = self._compute_virtual_outdoor(
+                decision, outdoor_for_mpc, duty_ratio=duty_ratio
+            )
             await self._apply_control(decision)
             self._last_control_on = decision
             self._last_control_time = now
@@ -1083,6 +1108,15 @@ class MpcHeatPumpClimate(ClimateEntity):
         delta = (now - self._last_control_time).total_seconds() / 3600
         return max(1 / 60, delta)
 
+    def _continuous_control_window_steps(self) -> int:
+        """Return the number of steps used for duty-ratio smoothing."""
+        try:
+            hours = float(self._continuous_control_window_hours)
+        except (TypeError, ValueError):
+            hours = DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
+        steps_per_hour = int(round(1 / self._controller.time_step_hours)) or 1
+        return max(1, int(round(hours * steps_per_hour)))
+
     async def _handle_control_interval(self, now) -> None:
         """Callback for periodic control loop."""
         self._request_control_run()
@@ -1156,6 +1190,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._price_comfort_weight = self._options[CONF_PRICE_COMFORT_WEIGHT]
         self._price_penalty_curve = self._options[CONF_PRICE_PENALTY_CURVE]
         self._price_baseline_window_hours = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
+        self._continuous_control_enabled = self._options[CONF_CONTINUOUS_CONTROL_ENABLED]
+        self._continuous_control_window_hours = self._options[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS]
         self._control_interval = self._options[CONF_CONTROL_INTERVAL_MINUTES]
         self._prediction_horizon = self._options[CONF_PREDICTION_HORIZON_HOURS]
         self._comfort_tolerance = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
@@ -1393,7 +1429,9 @@ class MpcHeatPumpClimate(ClimateEntity):
         await self.hass.services.async_call(domain, "turn_on", {"entity_id": entity_id}, blocking=False)
         return True
 
-    def _compute_virtual_outdoor(self, heat_on: bool, outdoor_forecast: list[float]) -> float | None:
+    def _compute_virtual_outdoor(
+        self, heat_on: bool, outdoor_forecast: list[float], *, duty_ratio: float | None = None
+    ) -> float | None:
         """Compute the virtual outdoor temperature to send to the pump interface."""
         base = None
         if self._outdoor_temp is not None:
@@ -1406,12 +1444,30 @@ class MpcHeatPumpClimate(ClimateEntity):
         if base is None:
             base = VIRTUAL_OUTDOOR_IDLE_FALLBACK
 
+        offset = max(0.0, float(self._virtual_heat_offset))
+        if self._continuous_control_enabled and duty_ratio is not None:
+            value = compute_continuous_virtual_outdoor(
+                base,
+                duty_ratio,
+                virtual_heat_offset=offset,
+                price=self._last_price_forecast[0] if self._last_price_forecast else None,
+                price_baseline=self._last_result.price_baseline if self._last_result else None,
+                price_comfort_weight=self._price_comfort_weight,
+                predicted_temp=self._indoor_temp,
+                target_temperature=self._target_temperature,
+                comfort_temperature_tolerance=self._comfort_tolerance,
+                overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
+                overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
+                max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
+            )
+            self._last_virtual_outdoor_shift = value - base
+            return value
+
         if heat_on:
-            value = base - self._virtual_heat_offset
+            value = base - offset
         else:
             # When idle, let the pump see the actual outdoor temp (or a safe fallback).
             value = base
-            offset = max(0.0, float(self._virtual_heat_offset))
             boost_total = 0.0
 
             # Price-aware suppression: push the virtual temp warmer during expensive slots.
@@ -1440,6 +1496,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             boost_total = min(boost_total, offset)
             value += boost_total
 
+        self._last_virtual_outdoor_shift = value - base
         # Never send a virtual outdoor warmer than 25C (summer/no heat).
         return min(value, MAX_VIRTUAL_OUTDOOR)
 
@@ -1784,6 +1841,19 @@ class MpcHeatPumpClimate(ClimateEntity):
         if price_baseline_window not in PRICE_BASELINE_WINDOW_OPTIONS:
             price_baseline_window = DEFAULT_PRICE_BASELINE_WINDOW_HOURS
 
+        continuous_enabled = bool(
+            options.get(CONF_CONTINUOUS_CONTROL_ENABLED, DEFAULT_CONTINUOUS_CONTROL_ENABLED)
+        )
+        continuous_window_raw = options.get(
+            CONF_CONTINUOUS_CONTROL_WINDOW_HOURS, DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
+        )
+        try:
+            continuous_window = float(continuous_window_raw)
+        except (TypeError, ValueError):
+            continuous_window = DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
+        if int(continuous_window) not in CONTINUOUS_CONTROL_WINDOW_OPTIONS:
+            continuous_window = float(DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS)
+
         comfort_tolerance = self._state_to_float(options.get(CONF_COMFORT_TEMPERATURE_TOLERANCE))
         if comfort_tolerance is None:
             comfort_tolerance = DEFAULT_COMFORT_TEMPERATURE_TOLERANCE
@@ -1821,6 +1891,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             CONF_PRICE_COMFORT_WEIGHT: price_comfort_weight,
             CONF_PRICE_PENALTY_CURVE: price_penalty_curve,
             CONF_PRICE_BASELINE_WINDOW_HOURS: price_baseline_window,
+            CONF_CONTINUOUS_CONTROL_ENABLED: continuous_enabled,
+            CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: continuous_window,
             CONF_CONTROL_INTERVAL_MINUTES: control_interval,
             CONF_PREDICTION_HORIZON_HOURS: prediction_horizon,
             CONF_COMFORT_TEMPERATURE_TOLERANCE: comfort_tolerance,
@@ -1944,6 +2016,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
             comfort_temperature_tolerance=self._comfort_tolerance,
             overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
+            continuous_control_enabled=self._continuous_control_enabled,
+            continuous_control_window_steps=self._continuous_control_window_steps()
+            if self._continuous_control_enabled
+            else None,
             max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
         )
         payload = {
@@ -1993,6 +2069,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             "price_baseline_window_hours": self._price_baseline_window_hours,
             "price_baseline_history_samples": baseline_details.get("history_samples"),
             "price_baseline_forecast_samples": baseline_details.get("forecast_samples"),
+            "continuous_control_enabled": self._continuous_control_enabled,
+            "continuous_control_window_hours": self._continuous_control_window_hours,
+            "continuous_control_duty_ratio": self._last_duty_ratio,
+            "continuous_control_virtual_outdoor_shift": self._last_virtual_outdoor_shift,
             "cost": self._last_result.cost if self._last_result else None,
             "predicted_temperatures": self._last_result.predicted_temperatures if self._last_result else None,
             "price_forecast": self._last_price_forecast,

@@ -63,6 +63,8 @@ Core control:
 - Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.7-0.95.
 - Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
 - Price baseline window (default: 24 h): how much recent observed history is used alongside forecasts when scaling prices (24/48/72 h).
+- Continuous control enabled (default: true): smooths virtual outdoor temperature using MPC duty ratio.
+- Continuous control window (default: 2 h): horizon used to compute the duty ratio (1–4 h).
 - Control interval (default: 15 min): how often MPC runs; keep 15-30 min unless you have slow sensors.
 - Prediction horizon (default: 24 h): MPC planning horizon; 12-24 h is typical.
 - Comfort tolerance (default: 1.0°C): deadband before comfort penalty; 0.5-1.5°C is typical.
@@ -102,6 +104,10 @@ controlled entity. The mapping is:
 - If idle: `virtual = outdoor + warm_bias`, where warm_bias depends on price and
   (optionally) indoor overshoot. Warm bias is capped by `virtual_heat_offset`.
 - A hard cap of 25C prevents pushing the pump into summer/no-heat mode.
+When **continuous control** is enabled, the controller smooths the virtual
+outdoor temperature based on the planned duty ratio over a short window. A
+ratio of 0 maps to `outdoor + virtual_heat_offset`, while 1 maps to
+`outdoor - virtual_heat_offset`, with price/overshoot warm-bias blended in.
 When overshoot warm bias is enabled, the MPC comfort penalty becomes asymmetric:
 above-target errors are penalized more strongly once indoor temperature exceeds
 the comfort tolerance. The warm-bias back-off ramps from a minimum of
