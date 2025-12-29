@@ -33,6 +33,7 @@ from .const import (
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
     CONF_PRICE_BASELINE_WINDOW_HOURS,
+    CONF_PRICE_ABSOLUTE_LOW_THRESHOLD,
     CONF_CONTINUOUS_CONTROL_ENABLED,
     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
     CONF_PRICE_PENALTY_CURVE,
@@ -54,6 +55,7 @@ from .const import (
     DEFAULT_PRICE_COMFORT_WEIGHT,
     DEFAULT_PRICE_PENALTY_CURVE,
     DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
+    DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD,
     DEFAULT_CONTINUOUS_CONTROL_ENABLED,
     DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
     DEFAULT_RLS_FORGETTING_FACTOR,
@@ -106,6 +108,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
                 CONF_PRICE_PENALTY_CURVE: DEFAULT_PRICE_PENALTY_CURVE,
                 CONF_PRICE_BASELINE_WINDOW_HOURS: DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
+                CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD,
                 CONF_CONTINUOUS_CONTROL_ENABLED: DEFAULT_CONTINUOUS_CONTROL_ENABLED,
                 CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
@@ -248,6 +251,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_PRICE_BASELINE_WINDOW_HOURS: user_input.get(
                     CONF_PRICE_BASELINE_WINDOW_HOURS, DEFAULT_PRICE_BASELINE_WINDOW_HOURS
                 ),
+                CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: user_input.get(
+                    CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
+                ),
                 CONF_CONTINUOUS_CONTROL_ENABLED: user_input.get(
                     CONF_CONTINUOUS_CONTROL_ENABLED, DEFAULT_CONTINUOUS_CONTROL_ENABLED
                 ),
@@ -299,6 +305,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         """Build the options schema (extracted to reuse on validation errors)."""
         current_data = self._config_entry.data
         options = self._config_entry.options
+        absolute_threshold_default = options.get(
+            CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
+        )
+        if isinstance(absolute_threshold_default, (int, float)):
+            absolute_threshold_default = str(absolute_threshold_default)
         return vol.Schema(
             {
                 vol.Required(
@@ -361,6 +372,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
+                vol.Required(
+                    CONF_PRICE_ABSOLUTE_LOW_THRESHOLD,
+                    default=absolute_threshold_default,
+                ): selector.TextSelector(selector.TextSelectorConfig()),
                 vol.Required(
                     CONF_CONTINUOUS_CONTROL_ENABLED,
                     default=options.get(

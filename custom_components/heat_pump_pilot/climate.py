@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import timedelta
 import logging
@@ -50,6 +51,7 @@ from .const import (
     CONF_PRICE_ENTITY,
     CONF_PRICE_PENALTY_CURVE,
     CONF_PRICE_BASELINE_WINDOW_HOURS,
+    CONF_PRICE_ABSOLUTE_LOW_THRESHOLD,
     CONF_CONTINUOUS_CONTROL_ENABLED,
     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
     CONF_TARGET_TEMPERATURE,
@@ -74,8 +76,13 @@ from .const import (
     DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
     DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
     DEFAULT_PRICE_COMFORT_WEIGHT,
+    DEFAULT_PRICE_RATIO_CAP,
     DEFAULT_PRICE_PENALTY_CURVE,
     DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
+    DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD,
+    PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO,
+    PRICE_ABSOLUTE_LOW_THRESHOLD_OFF,
+    PRICE_ABSOLUTE_LOW_WINDOW_HOURS,
     DEFAULT_CONTINUOUS_CONTROL_ENABLED,
     DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
     DEFAULT_RLS_FORGETTING_FACTOR,
@@ -108,11 +115,16 @@ from .performance_utils import (
 )
 from .performance_history import PerformanceHistoryStorage
 from .price_history import PriceHistoryStorage
-from .price_utils import classify_price, compute_price_baseline
+from .price_utils import (
+    classify_price,
+    compute_absolute_low_price_threshold,
+    compute_price_baseline,
+)
 from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator, ThermalModelStorage
 from .virtual_outdoor_utils import (
     compute_continuous_virtual_outdoor,
     compute_duty_ratio,
+    compute_idle_warm_bias,
     compute_overshoot_warm_bias,
     compute_planned_virtual_outdoor_temperatures,
 )
@@ -124,7 +136,7 @@ PARALLEL_UPDATES = 1
 # Amount to make the virtual outdoor colder when heat is requested.
 VIRTUAL_OUTDOOR_IDLE_FALLBACK = 10.0
 MAX_VIRTUAL_OUTDOOR = 25.0
-PRICE_HISTORY_MAX_ENTRIES = 192  # ~48h at 15-minute sampling.
+PRICE_HISTORY_MAX_ENTRIES = 2880  # ~30d at 15-minute sampling.
 THERMAL_PERSIST_INTERVAL = timedelta(minutes=15)
 
 NOTIFY_HEALTH_COOLDOWN = timedelta(hours=1)
@@ -182,6 +194,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._price_comfort_weight: float = self._options[CONF_PRICE_COMFORT_WEIGHT]
         self._price_penalty_curve: str = self._options[CONF_PRICE_PENALTY_CURVE]
         self._price_baseline_window_hours: int = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
+        self._price_absolute_low_threshold = self._options[CONF_PRICE_ABSOLUTE_LOW_THRESHOLD]
         self._continuous_control_enabled: bool = self._options[CONF_CONTINUOUS_CONTROL_ENABLED]
         self._continuous_control_window_hours: float = self._options[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS]
         self._control_interval: int = self._options[CONF_CONTROL_INTERVAL_MINUTES]
@@ -252,6 +265,9 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._last_price_forecast_source: str = "unavailable"
         self._last_outdoor_forecast_source: str = "unavailable"
         self._last_price_baseline_details: dict[str, int] = {}
+        self._last_absolute_low_threshold_details: dict[str, int] = {}
+        self._last_absolute_low_threshold_kind: str | None = None
+        self._last_absolute_low_threshold_value: float | None = None
         self._last_duty_ratio: float | None = None
         self._last_virtual_outdoor_shift: float | None = None
         self._last_virtual_outdoor: float | None = None
@@ -669,6 +685,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         except (TypeError, ValueError):
             current_price = None
         baseline_details = dict(self._last_price_baseline_details or {})
+        absolute_details = dict(self._last_absolute_low_threshold_details or {})
         heating_detected = self._get_heating_detected(dt_util.utcnow())
         nominal_heat_power_kw = NOMINAL_HEAT_POWER_KW
         time_step_hours = self._controller.time_step_hours
@@ -697,6 +714,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             "price_baseline_window_hours": self._price_baseline_window_hours,
             "price_baseline_history_samples": baseline_details.get("history_samples"),
             "price_baseline_forecast_samples": baseline_details.get("forecast_samples"),
+            "price_absolute_low_threshold": self._last_absolute_low_threshold_value,
+            "price_absolute_low_threshold_kind": self._last_absolute_low_threshold_kind,
+            "price_absolute_low_threshold_samples": absolute_details.get("history_samples"),
             "continuous_control_enabled": self._continuous_control_enabled,
             "continuous_control_window_hours": self._continuous_control_window_hours,
             "continuous_control_duty_ratio": self._last_duty_ratio,
@@ -1190,6 +1210,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._price_comfort_weight = self._options[CONF_PRICE_COMFORT_WEIGHT]
         self._price_penalty_curve = self._options[CONF_PRICE_PENALTY_CURVE]
         self._price_baseline_window_hours = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
+        self._price_absolute_low_threshold = self._options[CONF_PRICE_ABSOLUTE_LOW_THRESHOLD]
         self._continuous_control_enabled = self._options[CONF_CONTINUOUS_CONTROL_ENABLED]
         self._continuous_control_window_hours = self._options[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS]
         self._control_interval = self._options[CONF_CONTROL_INTERVAL_MINUTES]
@@ -1453,6 +1474,8 @@ class MpcHeatPumpClimate(ClimateEntity):
                 price=self._last_price_forecast[0] if self._last_price_forecast else None,
                 price_baseline=self._last_result.price_baseline if self._last_result else None,
                 price_comfort_weight=self._price_comfort_weight,
+                price_penalty_curve=self._price_penalty_curve,
+                price_ratio_cap=DEFAULT_PRICE_RATIO_CAP,
                 predicted_temp=self._indoor_temp,
                 target_temperature=self._target_temperature,
                 comfort_temperature_tolerance=self._comfort_tolerance,
@@ -1468,33 +1491,21 @@ class MpcHeatPumpClimate(ClimateEntity):
         else:
             # When idle, let the pump see the actual outdoor temp (or a safe fallback).
             value = base
-            boost_total = 0.0
-
-            # Price-aware suppression: push the virtual temp warmer during expensive slots.
-            current_price = self._last_price_forecast[0] if self._last_price_forecast else None
-            price_baseline = self._last_result.price_baseline if self._last_result else None
-            if current_price is not None and price_baseline and price_baseline > 0 and offset > 0:
-                ratio = current_price / price_baseline
-                if ratio > 1.0:
-                    suppression = self._price_comfort_weight  # 0-1 weight from options.
-                    boost = suppression * (ratio - 1.0) * max(1.0, offset)
-                    boost_total += max(0.0, boost)
-
-            # Overshoot warm-bias: when indoor is above target, bias the curve warmer to back off heating.
-            if self._overshoot_warm_bias_enabled and self._indoor_temp is not None and offset > 0:
-                overshoot = float(self._indoor_temp) - float(self._target_temperature)
-                if overshoot > float(self._comfort_tolerance):
-                    bias, _, _, _ = compute_overshoot_warm_bias(
-                        overshoot,
-                        self._comfort_tolerance,
-                        offset,
-                        self._overshoot_warm_bias_curve,
-                    )
-                    boost_total += bias
-
-            # Clamp the warm-shift so we never bias more than the configured offset.
-            boost_total = min(boost_total, offset)
-            value += boost_total
+            if offset > 0:
+                boost_total = compute_idle_warm_bias(
+                    price=self._last_price_forecast[0] if self._last_price_forecast else None,
+                    price_baseline=self._last_result.price_baseline if self._last_result else None,
+                    price_comfort_weight=self._price_comfort_weight,
+                    price_penalty_curve=self._price_penalty_curve,
+                    price_ratio_cap=DEFAULT_PRICE_RATIO_CAP,
+                    predicted_temp=self._indoor_temp,
+                    target_temperature=self._target_temperature,
+                    comfort_temperature_tolerance=self._comfort_tolerance,
+                    overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
+                    overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
+                    virtual_heat_offset=offset,
+                )
+                value += boost_total
 
         self._last_virtual_outdoor_shift = value - base
         # Never send a virtual outdoor warmer than 25C (summer/no heat).
@@ -1841,6 +1852,37 @@ class MpcHeatPumpClimate(ClimateEntity):
         if price_baseline_window not in PRICE_BASELINE_WINDOW_OPTIONS:
             price_baseline_window = DEFAULT_PRICE_BASELINE_WINDOW_HOURS
 
+        absolute_low_raw = options.get(
+            CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
+        )
+        absolute_low_threshold: float | str | None
+        if absolute_low_raw is None:
+            absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
+        elif isinstance(absolute_low_raw, str):
+            absolute_low_str = absolute_low_raw.strip().lower()
+            if absolute_low_str == PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO:
+                absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
+            elif absolute_low_str == PRICE_ABSOLUTE_LOW_THRESHOLD_OFF:
+                absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_OFF
+            else:
+                try:
+                    absolute_low_value = float(absolute_low_str)
+                except (TypeError, ValueError):
+                    absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
+                else:
+                    absolute_low_threshold = (
+                        absolute_low_value if absolute_low_value > 0 else PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
+                    )
+        else:
+            try:
+                absolute_low_value = float(absolute_low_raw)
+            except (TypeError, ValueError):
+                absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
+            else:
+                absolute_low_threshold = (
+                    absolute_low_value if absolute_low_value > 0 else PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
+                )
+
         continuous_enabled = bool(
             options.get(CONF_CONTINUOUS_CONTROL_ENABLED, DEFAULT_CONTINUOUS_CONTROL_ENABLED)
         )
@@ -1891,6 +1933,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             CONF_PRICE_COMFORT_WEIGHT: price_comfort_weight,
             CONF_PRICE_PENALTY_CURVE: price_penalty_curve,
             CONF_PRICE_BASELINE_WINDOW_HOURS: price_baseline_window,
+            CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: absolute_low_threshold,
             CONF_CONTINUOUS_CONTROL_ENABLED: continuous_enabled,
             CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: continuous_window,
             CONF_CONTROL_INTERVAL_MINUTES: control_interval,
@@ -1985,6 +2028,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         except (TypeError, ValueError):
             current_price = None
         baseline_details = dict(self._last_price_baseline_details or {})
+        absolute_details = dict(self._last_absolute_low_threshold_details or {})
         heating_supply_temperature = (
             self._get_state_as_float(self._heating_supply_temp_entity) if self._heating_supply_temp_entity else None
         )
@@ -2012,6 +2056,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             virtual_heat_offset=self._virtual_heat_offset,
             price_comfort_weight=self._price_comfort_weight,
             price_baseline=self._last_result.price_baseline if self._last_result else None,
+            price_penalty_curve=self._price_penalty_curve,
+            price_ratio_cap=DEFAULT_PRICE_RATIO_CAP,
             target_temperature=self._target_temperature,
             overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
             comfort_temperature_tolerance=self._comfort_tolerance,
@@ -2069,6 +2115,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             "price_baseline_window_hours": self._price_baseline_window_hours,
             "price_baseline_history_samples": baseline_details.get("history_samples"),
             "price_baseline_forecast_samples": baseline_details.get("forecast_samples"),
+            "price_absolute_low_threshold": self._last_absolute_low_threshold_value,
+            "price_absolute_low_threshold_kind": self._last_absolute_low_threshold_kind,
+            "price_absolute_low_threshold_samples": absolute_details.get("history_samples"),
             "continuous_control_enabled": self._continuous_control_enabled,
             "continuous_control_window_hours": self._continuous_control_window_hours,
             "continuous_control_duty_ratio": self._last_duty_ratio,
@@ -2440,9 +2489,12 @@ class MpcHeatPumpClimate(ClimateEntity):
         if value is None:
             return None
         try:
-            return float(value)
+            numeric = float(value)
         except (TypeError, ValueError):
             return None
+        if not math.isfinite(numeric):
+            return None
+        return numeric
 
     def _update_price_history(self, now, price_forecast: list[float]) -> None:
         """Maintain a simple rolling history of observed prices for baseline comparisons."""
@@ -2487,7 +2539,34 @@ class MpcHeatPumpClimate(ClimateEntity):
             baseline = float(baseline_raw) if baseline_raw is not None else None
         except (TypeError, ValueError):
             baseline = None
-        return classify_price(current, baseline)
+        absolute_threshold, threshold_kind, threshold_details = self._resolve_absolute_low_threshold()
+        self._last_absolute_low_threshold_value = absolute_threshold
+        self._last_absolute_low_threshold_kind = threshold_kind
+        self._last_absolute_low_threshold_details = threshold_details
+        return classify_price(current, baseline, absolute_low_threshold=absolute_threshold)
+
+    def _resolve_absolute_low_threshold(self) -> tuple[float | None, str | None, dict[str, int]]:
+        raw = self._price_absolute_low_threshold
+        if raw is None:
+            return None, None, {}
+        if isinstance(raw, str):
+            normalized = raw.strip().lower()
+            if normalized == PRICE_ABSOLUTE_LOW_THRESHOLD_OFF:
+                return None, "off", {}
+            if normalized == PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO:
+                threshold, details = compute_absolute_low_price_threshold(
+                    history=self._price_history,
+                    time_step_hours=self._controller.time_step_hours,
+                    window_hours=PRICE_ABSOLUTE_LOW_WINDOW_HOURS,
+                )
+                return threshold, "auto_30d_median", details
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None, None, {}
+        if value <= 0:
+            return None, None, {}
+        return value, "configured", {}
 
     def _thermal_model_heat_on_source(self) -> str:
         """Expose what heat-on signal (if any) drives the estimator."""

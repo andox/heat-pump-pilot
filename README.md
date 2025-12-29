@@ -63,6 +63,7 @@ Core control:
 - Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.7-0.95.
 - Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
 - Price baseline window (default: 24 h): how much recent observed history is used alongside forecasts when scaling prices (24/48/72 h).
+- Absolute low-price threshold (default: auto): cap classification at `normal` when the current price is below the threshold (`auto` = 30-day median, `off` disables the cap).
 - Continuous control enabled (default: true): smooths virtual outdoor temperature using MPC duty ratio.
 - Continuous control window (default: 2 h): horizon used to compute the duty ratio (1–4 h).
 - Control interval (default: 15 min): how often MPC runs; keep 15-30 min unless you have slow sensors.
@@ -96,6 +97,27 @@ Heating detection:
 
 Performance metrics:
 - Performance window (default: 24 h): 6/12/24/48/72/96 hours; 24–48 h is a good balance.
+
+## Quick presets (starter values)
+These are starting points; adjust after 1–2 days of data.
+
+Comfort‑first:
+- Price vs comfort weight: 0.70
+- Price penalty curve: sqrt
+- Comfort tolerance: 0.5–1.0°C
+- Virtual outdoor heat offset: 3–6°C
+
+Balanced:
+- Price vs comfort weight: 0.85
+- Price penalty curve: linear
+- Comfort tolerance: 0.8–1.2°C
+- Virtual outdoor heat offset: 4–8°C
+
+Price‑first:
+- Price vs comfort weight: 0.95
+- Price penalty curve: quadratic
+- Comfort tolerance: 1.0–1.5°C
+- Virtual outdoor heat offset: 6–10°C
 
 ## Virtual outdoor temperature
 The integration computes a "virtual outdoor" temperature and applies it to the
@@ -176,6 +198,12 @@ The integration uses a single baseline for both MPC and classification:
   `price_history_window` is the last 24/48/72 hours of observed prices.
   Non-positive prices are ignored and a small floor is used to avoid skew.
 The window length is controlled by **Price baseline window** in the options flow.
+Classification can also apply an **Absolute low-price threshold**. When set, any
+current price at or below the threshold will never classify above `normal`.
+Set it to `auto` to use the median of the last 30 days of observed prices, or
+`off` to disable the hybrid cap.
+On a fresh install, the `auto` threshold may be `None` until enough history is
+available; the cap is disabled until the history builds.
 
 Price-aware penalties only apply when `price_ratio > 1.0` (current price above baseline).
 The ratio is capped (default `3.0`) before applying the curve, and all curves are
@@ -201,10 +229,17 @@ Performance is computed over a configurable window (6/12/24/48/72/96 hours):
 
 These metrics are persisted and survive restarts.
 
+## Early-run behavior (history builds)
+Some features depend on stored history and will be less informative on day one:
+- **Absolute low-price threshold (auto)**: needs up to 30 days of price history.
+- **Price/comfort/accuracy scores**: need enough performance samples to be meaningful.
+- **Learning state / curve recommendation**: require samples from the learning window.
+These stabilize after 1–2 days of operation, and continue to improve with more data.
+
 ## Persistence and restart behavior
 The integration stores its state in `.storage`:
 - `heat_pump_pilot_<entry_id>_thermal.json` (learning model + history)
-- `heat_pump_pilot_<entry_id>_prices.json` (price history)
+- `heat_pump_pilot_<entry_id>_prices.json` (price history, up to ~30 days)
 - `heat_pump_pilot_<entry_id>_performance.json` (performance samples)
 
 This means learning, price baselines, and performance scores survive restarts.

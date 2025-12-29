@@ -13,7 +13,12 @@ if str(COMPONENT_ROOT) not in sys.path:
     sys.path.insert(0, str(COMPONENT_ROOT))
 
 from const import PRICE_BASELINE_FLOOR  # noqa: E402
-from price_utils import classify_price, compute_price_baseline, price_label_from_ratio  # noqa: E402
+from price_utils import (
+    classify_price,
+    compute_absolute_low_price_threshold,
+    compute_price_baseline,
+    price_label_from_ratio,
+)  # noqa: E402
 
 
 def test_price_baseline_uses_window_and_forecast() -> None:
@@ -65,5 +70,27 @@ def test_price_classification_labels() -> None:
     assert price_label_from_ratio(2.0) == "extreme"
 
     ratio, label = classify_price(0.2, 0.1)
+    assert ratio == pytest.approx(2.0)
+    assert label == "extreme"
+
+
+def test_absolute_low_threshold_from_history() -> None:
+    threshold, details = compute_absolute_low_price_threshold(
+        history=[0.0, -1.0, 0.2, 0.3, 0.4],
+        time_step_hours=1.0,
+        window_hours=24,
+    )
+    assert threshold == pytest.approx(0.3)
+    assert details["history_samples"] == 3
+
+
+def test_classification_caps_at_normal_when_absolute_low() -> None:
+    ratio, label = classify_price(0.5, 0.25, absolute_low_threshold=0.6)
+    assert ratio == pytest.approx(2.0)
+    assert label == "normal"
+
+
+def test_classification_no_cap_when_threshold_none() -> None:
+    ratio, label = classify_price(0.5, 0.25, absolute_low_threshold=None)
     assert ratio == pytest.approx(2.0)
     assert label == "extreme"

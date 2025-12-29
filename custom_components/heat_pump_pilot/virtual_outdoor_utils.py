@@ -8,6 +8,15 @@ from __future__ import annotations
 import math
 from typing import Iterable, Sequence
 
+try:
+    from .const import DEFAULT_PRICE_PENALTY_CURVE, DEFAULT_PRICE_RATIO_CAP, PRICE_PENALTY_CURVES
+except ImportError:  # pragma: no cover - allow direct imports in tests
+    from const import (  # type: ignore
+        DEFAULT_PRICE_PENALTY_CURVE,
+        DEFAULT_PRICE_RATIO_CAP,
+        PRICE_PENALTY_CURVES,
+    )
+
 
 def _coerce_float_iterable(values: Iterable[object] | None) -> list[float]:
     if values is None:
@@ -15,9 +24,12 @@ def _coerce_float_iterable(values: Iterable[object] | None) -> list[float]:
     coerced: list[float] = []
     for value in values:
         try:
-            coerced.append(float(value))
+            numeric = float(value)
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(numeric):
+            continue
+        coerced.append(numeric)
     return coerced
 
 
@@ -43,6 +55,8 @@ def compute_planned_virtual_outdoor_temperatures(
     price_baseline: float | None,
     comfort_temperature_tolerance: float,
     target_temperature: float | None = None,
+    price_penalty_curve: str = DEFAULT_PRICE_PENALTY_CURVE,
+    price_ratio_cap: float = DEFAULT_PRICE_RATIO_CAP,
     overshoot_warm_bias_enabled: bool = False,
     overshoot_warm_bias_curve: str = "linear",
     continuous_control_enabled: bool = False,
@@ -117,6 +131,8 @@ def compute_planned_virtual_outdoor_temperatures(
                 price=prices[idx] if prices else None,
                 price_baseline=baseline,
                 price_comfort_weight=weight,
+                price_penalty_curve=price_penalty_curve,
+                price_ratio_cap=price_ratio_cap,
                 predicted_temp=predicted[idx] if predicted else None,
                 target_temperature=target,
                 comfort_temperature_tolerance=tolerance,
@@ -130,10 +146,12 @@ def compute_planned_virtual_outdoor_temperatures(
         value = base - offset if heat_on else base
 
         if not heat_on and offset > 0:
-            boost_total = _compute_idle_warm_bias(
+            boost_total = compute_idle_warm_bias(
                 price=prices[idx] if prices else None,
                 price_baseline=baseline,
                 price_comfort_weight=weight,
+                price_penalty_curve=price_penalty_curve,
+                price_ratio_cap=price_ratio_cap,
                 predicted_temp=predicted[idx] if predicted else None,
                 target_temperature=target,
                 comfort_temperature_tolerance=tolerance,
@@ -156,6 +174,8 @@ def compute_continuous_virtual_outdoor(
     price: float | None,
     price_baseline: float | None,
     price_comfort_weight: float,
+    price_penalty_curve: str = DEFAULT_PRICE_PENALTY_CURVE,
+    price_ratio_cap: float = DEFAULT_PRICE_RATIO_CAP,
     predicted_temp: float | None,
     target_temperature: float | None,
     comfort_temperature_tolerance: float,
@@ -175,10 +195,12 @@ def compute_continuous_virtual_outdoor(
     base_shift = offset * (1.0 - 2.0 * ratio)
     value = float(base_outdoor) + base_shift
 
-    warm_bias = _compute_idle_warm_bias(
+    warm_bias = compute_idle_warm_bias(
         price=price,
         price_baseline=price_baseline,
         price_comfort_weight=price_comfort_weight,
+        price_penalty_curve=price_penalty_curve,
+        price_ratio_cap=price_ratio_cap,
         predicted_temp=predicted_temp,
         target_temperature=target_temperature,
         comfort_temperature_tolerance=comfort_temperature_tolerance,
@@ -212,11 +234,13 @@ def _compute_duty_ratios(sequence: Sequence[bool], window_steps: int) -> list[fl
     return [compute_duty_ratio(sequence, idx, window_steps) for idx in range(len(sequence))]
 
 
-def _compute_idle_warm_bias(
+def compute_idle_warm_bias(
     *,
     price: float | None,
     price_baseline: float | None,
     price_comfort_weight: float,
+    price_penalty_curve: str,
+    price_ratio_cap: float,
     predicted_temp: float | None,
     target_temperature: float | None,
     comfort_temperature_tolerance: float,
@@ -238,11 +262,12 @@ def _compute_idle_warm_bias(
         except (TypeError, ValueError):
             ratio = None
         if ratio is not None and ratio > 1.0:
+            shaped_ratio = _apply_price_penalty_curve(ratio, price_penalty_curve, price_ratio_cap)
             try:
                 weight = float(price_comfort_weight)
             except (TypeError, ValueError):
                 weight = 0.0
-            boost_total += weight * (ratio - 1.0) * max(1.0, offset)
+            boost_total += weight * (shaped_ratio - 1.0) * max(1.0, offset)
 
     if overshoot_warm_bias_enabled and target_temperature is not None and predicted_temp is not None:
         try:
@@ -261,6 +286,26 @@ def _compute_idle_warm_bias(
             boost_total += bias
 
     return min(max(0.0, boost_total), offset)
+
+
+def _apply_price_penalty_curve(ratio: float, curve: str, ratio_cap: float) -> float:
+    """Apply the configured price curve above the baseline ratio."""
+    if ratio <= 1.0:
+        return ratio
+    try:
+        cap = max(1.0, float(ratio_cap))
+    except (TypeError, ValueError):
+        cap = DEFAULT_PRICE_RATIO_CAP
+    capped_ratio = min(ratio, cap)
+    x = max(0.0, capped_ratio - 1.0)
+    curve = curve if curve in PRICE_PENALTY_CURVES else DEFAULT_PRICE_PENALTY_CURVE
+    if curve == "sqrt":
+        adjusted = math.sqrt(x)
+    elif curve == "quadratic":
+        adjusted = x * x
+    else:
+        adjusted = x
+    return 1.0 + adjusted
 
 
 def compute_overshoot_warm_bias(

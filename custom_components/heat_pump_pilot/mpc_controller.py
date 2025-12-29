@@ -169,6 +169,8 @@ class MpcController:
             cost=cost,
             price_baseline=price_baseline,
         )
+        if not sequence:
+            return False, result
         return bool(sequence[0]), result
 
     def _predict_temp(self, indoor_temp: float, outdoor_temp: float, heating_power: float) -> float:
@@ -304,7 +306,10 @@ class MpcController:
         coerced: list[float] = []
         for value in values:
             try:
-                coerced.append(float(value))
+                numeric = float(value)
             except (TypeError, ValueError):
                 continue
+            if not math.isfinite(numeric):
+                continue
+            coerced.append(numeric)
         return coerced

@@ -46,6 +46,23 @@ def test_planned_virtual_outdoor_idle_warm_shift_clamped_to_offset() -> None:
     assert planned == [16.0]
 
 
+def test_planned_virtual_outdoor_price_ratio_cap_shapes_bias() -> None:
+    planned = compute_planned_virtual_outdoor_temperatures(
+        [False],
+        outdoor_forecast=[6.0],
+        price_forecast=[5.0],
+        base_outdoor_fallback=6.0,
+        virtual_heat_offset=10.0,
+        price_comfort_weight=0.2,
+        price_baseline=1.0,
+        price_penalty_curve="linear",
+        price_ratio_cap=2.0,
+        comfort_temperature_tolerance=0.5,
+    )
+    # ratio capped to 2.0 -> boost = 0.2 * (2-1) * 10 = 2.0 => 6 + 2
+    assert planned == [8.0]
+
+
 def test_planned_virtual_outdoor_respects_max_virtual_outdoor() -> None:
     planned = compute_planned_virtual_outdoor_temperatures(
         [False],
