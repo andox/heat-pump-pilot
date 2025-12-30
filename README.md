@@ -359,20 +359,48 @@ cards:
         entity: sensor.heat_pump_pilot_health
         attribute: curve_recommendation
         name: Curve recommendation
-      - type: attribute
-        entity: sensor.heat_pump_pilot_health
-        attribute: curve_recommendation_details
-        name: Curve recommendation details
       - entity: sensor.heat_pump_pilot_control_state
         secondary_info: last-changed
       - entity: sensor.heat_pump_pilot_learning_state
         secondary_info: last-changed
       - entity: sensor.heat_pump_pilot_price_state
         secondary_info: last-changed
+      - type: attribute
+        entity: sensor.heat_pump_pilot_decision
+        attribute: price_absolute_low_threshold
+        name: Price low threshold
+      - type: attribute
+        entity: sensor.heat_pump_pilot_decision
+        attribute: price_absolute_low_threshold_kind
+        name: Price low threshold kind
       - entity: binary_sensor.heat_pump_pilot_heating_detected
         secondary_info: last-changed
     show_header_toggle: false
     state_color: true
+  - type: entities
+    title: Curve Recommendation Details
+    show_header_toggle: false
+    entities:
+      - type: attribute
+        entity: sensor.heat_pump_pilot_health
+        attribute: curve_recommendation_details
+        name: Curve recommendation details
+  - type: entities
+    title: Model Estimates
+    show_header_toggle: false
+    entities:
+      - type: attribute
+        entity: climate.heat_pump_pilot
+        attribute: estimated_heat_loss_coefficient
+        name: Estimated heat loss
+      - type: attribute
+        entity: climate.heat_pump_pilot
+        attribute: estimated_heat_gain_coefficient
+        name: Estimated heat gain
+      - type: attribute
+        entity: climate.heat_pump_pilot
+        attribute: estimated_indoor_temperature
+        name: Estimated indoor temp
   - type: entities
     title: Learning Details
     show_header_toggle: false
@@ -405,6 +433,10 @@ cards:
         entity: sensor.heat_pump_pilot_decision
         attribute: heating_duty_cycle_ratio
         name: Heating duty cycle ratio
+      - type: attribute
+        entity: sensor.heat_pump_pilot_decision
+        attribute: continuous_control_duty_ratio
+        name: Continuous duty ratio
       - type: attribute
         entity: sensor.heat_pump_pilot_decision
         attribute: overshoot_warm_bias_applied
