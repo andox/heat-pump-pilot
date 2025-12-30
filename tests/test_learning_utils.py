@@ -19,6 +19,7 @@ from const import (  # noqa: E402
     CONF_HEATING_SUPPLY_TEMP_THRESHOLD,
     CONF_INITIAL_HEAT_LOSS_OVERRIDE,
     CONF_LEARNING_MODEL,
+    CONF_LEARNING_WINDOW_HOURS,
     CONF_RLS_FORGETTING_FACTOR,
     CONF_THERMAL_RESPONSE_SEED,
     LEARNING_MODEL_EKF,
@@ -43,6 +44,7 @@ def test_should_reseed_false_for_unrelated_option_changes() -> None:
     current[CONF_CONTROL_INTERVAL_MINUTES] = 10
     current[CONF_HEATING_SUPPLY_TEMP_THRESHOLD] = 30
     current[CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS] = 0
+    current[CONF_LEARNING_WINDOW_HOURS] = 24
     assert should_reseed_thermal_model(previous, current) is False
 
 

@@ -35,6 +35,7 @@
           "prediction_horizon_hours": "Prediction horizon (hours)",
           "comfort_temperature_tolerance": "Comfort tolerance (°C)",
           "performance_window_hours": "Performance window (hours)",
+          "learning_window_hours": "Learning window (hours)",
           "monitor_only": "Monitor only (do not send control commands)",
           "virtual_outdoor_heat_offset": "Virtual outdoor offset when heating (°C)",
           "price_penalty_curve": "Price penalty curve",

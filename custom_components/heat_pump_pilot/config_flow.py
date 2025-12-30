@@ -17,6 +17,7 @@ from .const import (
     CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
     CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN,
     CONF_LEARNING_MODEL,
+    CONF_LEARNING_WINDOW_HOURS,
     CONF_INDOOR_TEMP,
     CONF_MONITOR_ONLY,
     CONF_INITIAL_HEAT_GAIN,
@@ -50,6 +51,7 @@ from .const import (
     DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
     DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN,
     DEFAULT_LEARNING_MODEL,
+    DEFAULT_LEARNING_WINDOW_HOURS,
     DEFAULT_PERFORMANCE_WINDOW_HOURS,
     DEFAULT_PREDICTION_HORIZON_HOURS,
     DEFAULT_PRICE_COMFORT_WEIGHT,
@@ -77,6 +79,7 @@ from .const import (
     PRICE_BASELINE_WINDOW_OPTIONS,
     CONTINUOUS_CONTROL_WINDOW_OPTIONS,
     PERFORMANCE_WINDOW_OPTIONS,
+    LEARNING_WINDOW_OPTIONS,
 )
 
 
@@ -119,6 +122,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_RLS_FORGETTING_FACTOR: user_input.get(
                     CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR
                 ),
+                CONF_LEARNING_WINDOW_HOURS: DEFAULT_LEARNING_WINDOW_HOURS,
                 CONF_PERFORMANCE_WINDOW_HOURS: DEFAULT_PERFORMANCE_WINDOW_HOURS,
                 CONF_HEATING_SUPPLY_TEMP_ENTITY: None,
                 CONF_HEATING_SUPPLY_TEMP_THRESHOLD: DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD,
@@ -440,6 +444,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[str(value) for value in PERFORMANCE_WINDOW_OPTIONS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_LEARNING_WINDOW_HOURS,
+                    default=str(options.get(CONF_LEARNING_WINDOW_HOURS, DEFAULT_LEARNING_WINDOW_HOURS)),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[str(value) for value in LEARNING_WINDOW_OPTIONS],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),

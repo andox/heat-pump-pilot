@@ -81,6 +81,7 @@ Virtual outdoor control:
 Learning:
 - Learning model (default: ekf): ekf is stable; rls can react faster to changes.
 - RLS forgetting factor (default: 0.99): lower = faster adaptation; 0.97–0.995 is typical.
+- Learning window (default: 12 h): history window used to decide stable vs learning; 12–24 h is a good balance.
 - Thermal response seed (default: 0.5): initial guess for loss/gain; leave default unless you know your system.
 - Base heat loss coefficient (default: 0.05): used until learning refines it; leave default in most cases.
 - Initial indoor temp (default: unset): optional override; leave empty to use sensor value.

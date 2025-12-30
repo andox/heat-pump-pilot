@@ -42,6 +42,7 @@ from .const import (
     CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
     CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN,
     CONF_LEARNING_MODEL,
+    CONF_LEARNING_WINDOW_HOURS,
     CONF_MONITOR_ONLY,
     CONF_OUTDOOR_TEMP,
     CONF_OVERSHOOT_WARM_BIAS_ENABLED,
@@ -71,6 +72,7 @@ from .const import (
     DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
     DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN,
     DEFAULT_LEARNING_MODEL,
+    DEFAULT_LEARNING_WINDOW_HOURS,
     DEFAULT_PERFORMANCE_WINDOW_HOURS,
     DEFAULT_PREDICTION_HORIZON_HOURS,
     DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
@@ -99,6 +101,7 @@ from .const import (
     CONTINUOUS_CONTROL_WINDOW_OPTIONS,
     PRICE_PENALTY_CURVES,
     PERFORMANCE_WINDOW_OPTIONS,
+    LEARNING_WINDOW_OPTIONS,
     SIGNAL_DECISION_UPDATED,
     SIGNAL_OPTIONS_UPDATED,
 )
@@ -146,7 +149,6 @@ NOTIFY_FALLBACK_COOLDOWN = timedelta(hours=6)
 NOTIFY_EXCEPTION_COOLDOWN = timedelta(minutes=30)
 MODEL_HISTORY_MAX_ENTRIES = 192  # ~48h at 15-minute sampling.
 NOMINAL_HEAT_POWER_KW = 3.0
-LEARNING_STABLE_WINDOW = timedelta(hours=6)
 LEARNING_STABLE_RELATIVE_DELTA = 0.05  # 5% relative change threshold.
 PRICE_HISTORY_BACKFILL_MIN_SAMPLES = 16  # Avoid noisy baseline after restart.
 PRICE_HISTORY_BACKFILL_MAX_ATTEMPTS = 5
@@ -205,6 +207,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._heat_loss_coeff: float = self._options[CONF_HEAT_LOSS_COEFFICIENT]
         self._learning_model: str = self._options[CONF_LEARNING_MODEL]
         self._rls_forgetting_factor: float = self._options[CONF_RLS_FORGETTING_FACTOR]
+        self._learning_window_hours: int = self._options[CONF_LEARNING_WINDOW_HOURS]
         self._performance_window_hours: int = self._options[CONF_PERFORMANCE_WINDOW_HOURS]
         self._heating_supply_temp_entity: str | None = self._options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY)
         self._heating_supply_temp_threshold: float = float(
@@ -1220,6 +1223,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._virtual_heat_offset = self._options[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET]
         self._learning_model = self._options[CONF_LEARNING_MODEL]
         self._rls_forgetting_factor = self._options[CONF_RLS_FORGETTING_FACTOR]
+        self._learning_window_hours = self._options[CONF_LEARNING_WINDOW_HOURS]
         self._heating_supply_temp_entity = self._options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY)
         self._heating_supply_temp_threshold = float(
             self._options.get(CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD)
@@ -1925,6 +1929,13 @@ class MpcHeatPumpClimate(ClimateEntity):
             performance_window = DEFAULT_PERFORMANCE_WINDOW_HOURS
         if performance_window not in PERFORMANCE_WINDOW_OPTIONS:
             performance_window = DEFAULT_PERFORMANCE_WINDOW_HOURS
+        learning_window_raw = options.get(CONF_LEARNING_WINDOW_HOURS, DEFAULT_LEARNING_WINDOW_HOURS)
+        try:
+            learning_window = int(learning_window_raw)
+        except (TypeError, ValueError):
+            learning_window = DEFAULT_LEARNING_WINDOW_HOURS
+        if learning_window not in LEARNING_WINDOW_OPTIONS:
+            learning_window = DEFAULT_LEARNING_WINDOW_HOURS
         learning_model = options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL)
         if learning_model not in (LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
             learning_model = DEFAULT_LEARNING_MODEL
@@ -1953,6 +1964,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             CONF_THERMAL_RESPONSE_SEED: options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
             CONF_LEARNING_MODEL: learning_model,
             CONF_RLS_FORGETTING_FACTOR: rls_factor,
+            CONF_LEARNING_WINDOW_HOURS: learning_window,
             CONF_PERFORMANCE_WINDOW_HOURS: performance_window,
             CONF_HEATING_SUPPLY_TEMP_ENTITY: options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY),
             CONF_HEATING_SUPPLY_TEMP_THRESHOLD: options.get(
@@ -2403,10 +2415,11 @@ class MpcHeatPumpClimate(ClimateEntity):
             return "disabled", {"reason": "no_heat_on_signal"}
 
         when = dt_util.as_utc(now)
-        cutoff = when - LEARNING_STABLE_WINDOW
+        window_hours = max(1.0, float(self._learning_window_hours))
+        cutoff = when - timedelta(hours=window_hours)
         samples = [(t, loss, gain) for (t, loss, gain) in self._model_history if t >= cutoff]
         if len(samples) < 4:
-            return "learning", {"source": source, "samples": len(samples), "window_hours": LEARNING_STABLE_WINDOW.total_seconds() / 3600}
+            return "learning", {"source": source, "samples": len(samples), "window_hours": window_hours}
 
         first_t, first_loss, first_gain = samples[0]
         last_t, last_loss, last_gain = samples[-1]
@@ -2415,7 +2428,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         state = "stable" if (loss_delta < LEARNING_STABLE_RELATIVE_DELTA and gain_delta < LEARNING_STABLE_RELATIVE_DELTA) else "learning"
         return state, {
             "source": source,
-            "window_hours": LEARNING_STABLE_WINDOW.total_seconds() / 3600,
+            "window_hours": window_hours,
             "samples": len(samples),
             "loss_change_ratio": loss_delta,
             "gain_change_ratio": gain_delta,
