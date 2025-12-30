@@ -455,6 +455,287 @@ cards:
         name: Back-off max (°C)
 ```
 
+## ApexCharts overview (example)
+This ApexCharts card shows indoor/virtual/outdoor temperatures alongside Nordpool prices.
+Replace entity IDs with your own sensors/entities (indoor temp, outdoor temp, Nordpool, etc.).
+
+```yaml
+type: custom:apexcharts-card
+header:
+  title: Heat Pump Pilot — Overview
+  show_states: true
+  colorize_states: true
+graph_span: 48h
+span:
+  start: hour
+  offset: "-24h"
+now:
+  show: true
+all_series_config:
+  extend_to: now
+apex_config:
+  grid:
+    show: true
+    strokeDashArray: 0.11
+  chart:
+    height: 500
+    animations:
+      enabled: false
+  stroke:
+    width: 1.4
+    curve: smooth
+  markers:
+    size: 0
+  tooltip:
+    shared: true
+    intersect: false
+  legend:
+    show: true
+    position: bottom
+    fontSize: 11px
+    itemMargin:
+      horizontal: 10
+      vertical: 2
+yaxis:
+  - id: temp
+    min: -10
+    decimals: 1
+    apex_config:
+      title:
+        text: Temp (°C)
+  - id: outdoor
+    show: false
+    min: -10
+    max: 25
+    decimals: 1
+  - id: virt
+    show: false
+    min: -10
+    max: 25
+    decimals: 1
+  - id: price
+    opposite: true
+    min: -0.1
+    decimals: 2
+    apex_config:
+      title:
+        text: Price (SEK/kWh)
+  - id: binary
+    opposite: true
+    show: false
+    min: -0.05
+    max: 1.05
+    decimals: 0
+series:
+  - name: Heat detected
+    entity: binary_sensor.heat_pump_pilot_heating_detected
+    type: area
+    yaxis_id: binary
+    color: "#94A3B8"
+    stroke_width: 1
+    curve: stepline
+    opacity: 0.012
+    group_by:
+      duration: 5min
+      func: max
+    transform: "return (x === 'on' || x === true) ? 0.2 : 0;"
+    show:
+      legend_value: false
+  - name: Heat request
+    entity: sensor.heat_pump_pilot_decision
+    type: area
+    yaxis_id: binary
+    color: "#EF4444"
+    stroke_width: 1
+    curve: stepline
+    opacity: 0.35
+    group_by:
+      duration: 5min
+      func: max
+    transform: "return (x === 'heat_on') ? 0.2 : 0;"
+    show:
+      legend_value: false
+  - name: Indoor (sensor)
+    entity: sensor.sonoff_snzb_02d_temperature
+    type: line
+    yaxis_id: temp
+    color: "#22C55E"
+    group_by:
+      duration: 15min
+      func: avg
+    show:
+      in_header: true
+      legend_value: false
+  - name: Indoor predicted
+    entity: sensor.heat_pump_pilot_decision
+    type: line
+    yaxis_id: temp
+    color: "#16A34A"
+    stroke_dash: 2
+    stroke_width: 1
+    extend_to: false
+    show:
+      legend_value: false
+    data_generator: >
+      const d = entity?.attributes || {}; const arr = d.predicted_temperatures
+      || []; const t0 = Date.parse(d.last_control_time || ""); const dt = 15 *
+      60 * 1000; if (!t0 || !arr.length) return []; const cutoff = Date.now() -
+      dt; return arr
+        .map((v, i) => [t0 + i * dt, Number(v)])
+        .filter(p => Number.isFinite(p[1]) && p[0] >= cutoff);
+  - name: Target (setpoint)
+    entity: climate.heat_pump_pilot
+    type: line
+    yaxis_id: temp
+    color: "#9CA3AF"
+    stroke_width: 1
+    stroke_dash: 4
+    extend_to: false
+    show:
+      legend_value: false
+    data_generator: >
+      const t = Number(entity?.attributes?.temperature); if
+      (!Number.isFinite(t)) return []; const now = Date.now(); return [[now - 24
+      * 60 * 60 * 1000, t], [now + 24 * 60 * 60 * 1000, t]];
+  - name: Outdoor (sensor)
+    entity: sensor.outdoor_temperature
+    type: line
+    yaxis_id: outdoor
+    color: "#38BDF8"
+    stroke_width: 1
+    group_by:
+      duration: 15min
+      func: avg
+    show:
+      in_header: true
+      legend_value: false
+  - name: Outdoor forecast
+    entity: sensor.heat_pump_pilot_decision
+    type: line
+    yaxis_id: outdoor
+    color: "#0EA5E9"
+    stroke_width: 2
+    stroke_dash: 4
+    extend_to: false
+    show:
+      legend_value: false
+    data_generator: >
+      const d = entity?.attributes || {}; const arr = d.outdoor_forecast || [];
+      const t0 = Date.parse(d.last_control_time || ""); const dt = 15 * 60 *
+      1000; if (!t0 || !arr.length) return []; const cutoff = Date.now() - dt;
+      return arr
+        .map((v, i) => [t0 + i * dt, Number(v)])
+        .filter(p => Number.isFinite(p[1]) && p[0] >= cutoff);
+  - name: Virtual outdoor (planned)
+    entity: sensor.heat_pump_pilot_decision
+    type: line
+    yaxis_id: virt
+    color: "#FBBF24"
+    stroke_width: 1
+    stroke_dash: 2
+    curve: stepline
+    extend_to: false
+    show:
+      legend_value: false
+    data_generator: >
+      const d = entity?.attributes || {}; const arr =
+      d.planned_virtual_outdoor_temperatures || []; const t0 =
+      Date.parse(d.last_control_time || ""); const dt = 15 * 60 * 1000; if (!t0
+      || !arr.length) return []; const cutoff = Date.now() - dt; return arr
+        .map((v, i) => [t0 + i * dt, Number(v)])
+        .filter(p => Number.isFinite(p[1]) && p[0] >= cutoff);
+  - name: Virtual outdoor
+    entity: sensor.heat_pump_pilot_virtual_outdoor
+    type: line
+    yaxis_id: virt
+    color: "#F59E0B"
+    stroke_width: 2
+    curve: stepline
+    show:
+      in_header: true
+      legend_value: false
+  - name: Warm-bias applied
+    entity: sensor.heat_pump_pilot_decision
+    type: line
+    yaxis_id: virt
+    color: "#D97706"
+    stroke_dash: 8
+    stroke_width: 1
+    opacity: 0.15
+    extend_to: false
+    show:
+      legend_value: false
+    data_generator: >
+      const applied = Number(entity?.attributes?.overshoot_warm_bias_applied);
+      if (!Number.isFinite(applied)) return []; const now = Date.now(); return
+      [[now - 24 * 60 * 60 * 1000, applied], [now + 24 * 60 * 60 * 1000,
+      applied]];
+  - name: Nordpool (actual)
+    entity: sensor.nordpool_kwh_se3_sek_3_10_025
+    type: line
+    yaxis_id: price
+    color: "#7C3AED"
+    stroke_width: 1.2
+    curve: stepline
+    extend_to: now
+    show:
+      in_header: true
+      legend_value: false
+    data_generator: >
+      const now = Date.now(); const a = entity?.attributes || {}; const today =
+      Array.isArray(a.raw_today) ? a.raw_today : []; const tomorrow =
+      Array.isArray(a.raw_tomorrow) ? a.raw_tomorrow : []; return [...today,
+      ...tomorrow]
+        .filter(p => p && p.start && p.value !== undefined)
+        .map(p => [new Date(p.start).getTime(), Number(p.value)])
+        .filter(p => Number.isFinite(p[1]) && p[0] <= now);
+  - name: Nordpool (forecast)
+    entity: sensor.nordpool_kwh_se3_sek_3_10_025
+    type: line
+    yaxis_id: price
+    color: "#6D28D9"
+    stroke_width: 1
+    stroke_dash: 2
+    curve: stepline
+    extend_to: false
+    show:
+      legend_value: false
+    data_generator: >
+      const now = Date.now(); const a = entity?.attributes || {}; const today =
+      Array.isArray(a.raw_today) ? a.raw_today : []; const tomorrow =
+      Array.isArray(a.raw_tomorrow) ? a.raw_tomorrow : []; return [...today,
+      ...tomorrow]
+        .filter(p => p && p.start && p.value !== undefined)
+        .map(p => [new Date(p.start).getTime(), Number(p.value)])
+        .filter(p => Number.isFinite(p[1]) && p[0] >= now);
+  - name: Price baseline
+    entity: sensor.heat_pump_pilot_decision
+    type: line
+    yaxis_id: price
+    color: "#4C1D95"
+    stroke_width: 1
+    stroke_dash: 15
+    extend_to: false
+    show:
+      legend_value: false
+    data_generator: >
+      const b = Number(entity?.attributes?.price_baseline); if
+      (!Number.isFinite(b)) return []; const now = Date.now(); return [[now - 24
+      * 60 * 60 * 1000, b], [now + 24 * 60 * 60 * 1000, b]];
+```
+
+## Screenshots
+<table>
+  <tr>
+    <td align="center">
+      <img src="screenshots/chart_example_1.png" alt="ApexCharts example" width="420">
+    </td>
+    <td align="center">
+      <img src="screenshots/sensor_1.png" alt="Diagnostics example" width="420">
+    </td>
+  </tr>
+</table>
+
 ## Tests
 Tests live under `tests/`:
 - `test_forecast_utils.py`
