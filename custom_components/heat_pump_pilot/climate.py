@@ -1466,6 +1466,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             base = VIRTUAL_OUTDOOR_IDLE_FALLBACK
 
         offset = max(0.0, float(self._virtual_heat_offset))
+        price_ratio_cap = getattr(self._controller, "price_ratio_cap", DEFAULT_PRICE_RATIO_CAP)
         if self._continuous_control_enabled and duty_ratio is not None:
             value = compute_continuous_virtual_outdoor(
                 base,
@@ -1475,7 +1476,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                 price_baseline=self._last_result.price_baseline if self._last_result else None,
                 price_comfort_weight=self._price_comfort_weight,
                 price_penalty_curve=self._price_penalty_curve,
-                price_ratio_cap=DEFAULT_PRICE_RATIO_CAP,
+                price_ratio_cap=price_ratio_cap,
                 predicted_temp=self._indoor_temp,
                 target_temperature=self._target_temperature,
                 comfort_temperature_tolerance=self._comfort_tolerance,
@@ -1497,7 +1498,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                     price_baseline=self._last_result.price_baseline if self._last_result else None,
                     price_comfort_weight=self._price_comfort_weight,
                     price_penalty_curve=self._price_penalty_curve,
-                    price_ratio_cap=DEFAULT_PRICE_RATIO_CAP,
+                    price_ratio_cap=price_ratio_cap,
                     predicted_temp=self._indoor_temp,
                     target_temperature=self._target_temperature,
                     comfort_temperature_tolerance=self._comfort_tolerance,
@@ -1729,9 +1730,12 @@ class MpcHeatPumpClimate(ClimateEntity):
         if values:
             for val in values:
                 try:
-                    normalized.append(float(val))
+                    numeric = float(val)
                 except (TypeError, ValueError):
                     continue
+                if not math.isfinite(numeric):
+                    continue
+                normalized.append(numeric)
         if not normalized:
             normalized = [fallback]
         if len(normalized) < steps:
@@ -2047,6 +2051,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         )
         if base_outdoor_fallback is None:
             base_outdoor_fallback = VIRTUAL_OUTDOOR_IDLE_FALLBACK
+        price_ratio_cap = getattr(self._controller, "price_ratio_cap", DEFAULT_PRICE_RATIO_CAP)
         planned_virtual_outdoor = compute_planned_virtual_outdoor_temperatures(
             self._last_result.sequence if self._last_result else None,
             self._last_outdoor_forecast,
@@ -2057,7 +2062,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             price_comfort_weight=self._price_comfort_weight,
             price_baseline=self._last_result.price_baseline if self._last_result else None,
             price_penalty_curve=self._price_penalty_curve,
-            price_ratio_cap=DEFAULT_PRICE_RATIO_CAP,
+            price_ratio_cap=price_ratio_cap,
             target_temperature=self._target_temperature,
             overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
             comfort_temperature_tolerance=self._comfort_tolerance,

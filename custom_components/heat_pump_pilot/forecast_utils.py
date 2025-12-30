@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import math
 from typing import Any, Iterable
 
 
@@ -61,6 +62,8 @@ def extract_timed_values(raw: Iterable[Any] | None) -> list[TimedValue]:
                 numeric = float(value_raw)
             except (TypeError, ValueError):
                 continue
+            if not math.isfinite(numeric):
+                continue
 
             start = parse_datetime(item.get("start") or item.get("from") or item.get("datetime"))
             end = parse_datetime(item.get("end") or item.get("to"))
@@ -70,6 +73,8 @@ def extract_timed_values(raw: Iterable[Any] | None) -> list[TimedValue]:
         try:
             numeric = float(item)
         except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric):
             continue
         values.append(TimedValue(start=None, end=None, value=numeric))
 
@@ -101,6 +106,8 @@ def extract_timed_temperatures(
         try:
             numeric = float(temp_raw)
         except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric):
             continue
 
         start = parse_datetime(item.get("datetime") or item.get("start") or item.get("from") or item.get("time"))
