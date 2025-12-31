@@ -49,13 +49,18 @@ def compute_price_baseline(
     history_positive = [value for value in history_values if value > 0]
 
     forecast_values = _coerce_float_iterable(forecast)
-    forecast_expanded = []
+    forecast_expanded: list[float] = []
     if forecast_values:
-        forecast_expanded = expand_to_steps(
-            forecast_values,
-            len(forecast_values) * steps_per_hour,
-            time_step_hours,
-        )
+        expected_step_samples = steps_per_hour * min(int(window_hours), 24)
+        forecast_is_step = time_step_hours < 1 and len(forecast_values) >= expected_step_samples
+        if forecast_is_step:
+            forecast_expanded = list(forecast_values)
+        else:
+            forecast_expanded = expand_to_steps(
+                forecast_values,
+                len(forecast_values) * steps_per_hour,
+                time_step_hours,
+            )
     forecast_positive = [value for value in forecast_expanded if value > 0]
 
     baseline_pool = history_positive + forecast_positive

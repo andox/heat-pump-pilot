@@ -1102,6 +1102,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             return None
 
         if not self._monitor_only:
+            if self._continuous_control_enabled and self._last_duty_ratio is not None:
+                return float(self._last_duty_ratio)
             return float(self._last_control_on)
 
         entity_id = self._controlled_entity
