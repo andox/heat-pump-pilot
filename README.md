@@ -5,6 +5,14 @@ MPC (model predictive control) loop to steer a heat pump through a "virtual
 outdoor temperature" setpoint. It balances comfort vs electricity price and
 continuously learns a simple thermal model of your home.
 
+Instead of directly switching the compressor, Heat Pump Pilot writes a virtual
+outdoor temperature to a `number.*` entity. For ground source heat pumps, this
+virtual outdoor temperature shifts the heating curve (outdoor temperature to
+supply temperature), and the pump's own integral-minutes logic decides when to
+start or stop. Lower virtual outdoor temperatures request higher supply
+temperatures (more heating), while higher virtual temperatures back off
+heating.
+
 Repository: https://github.com/andox/heat-pump-pilot
 
 ## Features
@@ -63,7 +71,8 @@ Core control:
 - Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.7-0.95.
 - Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
 - Price baseline window (default: 24 h): how much recent observed history is used alongside forecasts when scaling prices (24/48/72 h).
-- Absolute low-price threshold (default: auto): cap classification at `normal` when the current price is below the threshold (`auto` = 30-day median, `off` disables the cap).
+- Absolute low-price threshold (default: auto): cap classification at `normal` when the current price is below the threshold (`auto` = median of recent history, `off` disables the cap).
+- Absolute low-price auto window (default: 30 d): window used for the `auto` threshold (7/14/30 days).
 - Continuous control enabled (default: true): smooths virtual outdoor temperature using MPC duty ratio.
 - Continuous control window (default: 2 h): horizon used to compute the duty ratio (1–4 h).
 - Control interval (default: 15 min): how often MPC runs; keep 15-30 min unless you have slow sensors.
@@ -188,7 +197,7 @@ temperature:
 - Clamps coefficients to safe ranges.
 
 ### Learning state
-Learning state uses a rolling 6-hour window of model history:
+Learning state uses a rolling window of model history (default 12 h):
 - If the relative change in loss and gain stays under 5%, the model is **stable**.
 - Otherwise, it is **learning**.
 - If no heat signal is available, learning is **disabled**.
@@ -201,8 +210,8 @@ The integration uses a single baseline for both MPC and classification:
 The window length is controlled by **Price baseline window** in the options flow.
 Classification can also apply an **Absolute low-price threshold**. When set, any
 current price at or below the threshold will never classify above `normal`.
-Set it to `auto` to use the median of the last 30 days of observed prices, or
-`off` to disable the hybrid cap.
+Set it to `auto` to use the median of the configured history window (7/14/30 days),
+or `off` to disable the hybrid cap.
 On a fresh install, the `auto` threshold may be `None` until enough history is
 available; the cap is disabled until the history builds.
 
@@ -232,7 +241,7 @@ These metrics are persisted and survive restarts.
 
 ## Early-run behavior (history builds)
 Some features depend on stored history and will be less informative on day one:
-- **Absolute low-price threshold (auto)**: needs up to 30 days of price history.
+- **Absolute low-price threshold (auto)**: needs up to the configured window (7/14/30 days) of price history.
 - **Price/comfort/accuracy scores**: need enough performance samples to be meaningful.
 - **Learning state / curve recommendation**: require samples from the learning window.
 These stabilize after 1–2 days of operation, and continue to improve with more data.

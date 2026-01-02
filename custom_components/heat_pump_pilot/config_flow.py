@@ -35,6 +35,7 @@ from .const import (
     CONF_PRICE_ENTITY,
     CONF_PRICE_BASELINE_WINDOW_HOURS,
     CONF_PRICE_ABSOLUTE_LOW_THRESHOLD,
+    CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     CONF_CONTINUOUS_CONTROL_ENABLED,
     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
     CONF_PRICE_PENALTY_CURVE,
@@ -58,6 +59,7 @@ from .const import (
     DEFAULT_PRICE_PENALTY_CURVE,
     DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
     DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD,
+    DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     DEFAULT_CONTINUOUS_CONTROL_ENABLED,
     DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
     DEFAULT_RLS_FORGETTING_FACTOR,
@@ -77,6 +79,7 @@ from .const import (
     OVERSHOOT_WARM_BIAS_CURVES,
     PRICE_PENALTY_CURVES,
     PRICE_BASELINE_WINDOW_OPTIONS,
+    PRICE_ABSOLUTE_LOW_WINDOW_DAYS_OPTIONS,
     CONTINUOUS_CONTROL_WINDOW_OPTIONS,
     PERFORMANCE_WINDOW_OPTIONS,
     LEARNING_WINDOW_OPTIONS,
@@ -112,6 +115,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PRICE_PENALTY_CURVE: DEFAULT_PRICE_PENALTY_CURVE,
                 CONF_PRICE_BASELINE_WINDOW_HOURS: DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
                 CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD,
+                CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
                 CONF_CONTINUOUS_CONTROL_ENABLED: DEFAULT_CONTINUOUS_CONTROL_ENABLED,
                 CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
@@ -258,6 +262,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: user_input.get(
                     CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
                 ),
+                CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: user_input.get(
+                    CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS, DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS
+                ),
                 CONF_CONTINUOUS_CONTROL_ENABLED: user_input.get(
                     CONF_CONTINUOUS_CONTROL_ENABLED, DEFAULT_CONTINUOUS_CONTROL_ENABLED
                 ),
@@ -380,6 +387,20 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_PRICE_ABSOLUTE_LOW_THRESHOLD,
                     default=absolute_threshold_default,
                 ): selector.TextSelector(selector.TextSelectorConfig()),
+                vol.Required(
+                    CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
+                    default=str(
+                        options.get(
+                            CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
+                            DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
+                        )
+                    ),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[str(value) for value in PRICE_ABSOLUTE_LOW_WINDOW_DAYS_OPTIONS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
                 vol.Required(
                     CONF_CONTINUOUS_CONTROL_ENABLED,
                     default=options.get(

@@ -53,6 +53,7 @@ from .const import (
     CONF_PRICE_PENALTY_CURVE,
     CONF_PRICE_BASELINE_WINDOW_HOURS,
     CONF_PRICE_ABSOLUTE_LOW_THRESHOLD,
+    CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     CONF_CONTINUOUS_CONTROL_ENABLED,
     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
     CONF_TARGET_TEMPERATURE,
@@ -82,9 +83,10 @@ from .const import (
     DEFAULT_PRICE_PENALTY_CURVE,
     DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
     DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD,
+    DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO,
     PRICE_ABSOLUTE_LOW_THRESHOLD_OFF,
-    PRICE_ABSOLUTE_LOW_WINDOW_HOURS,
+    PRICE_ABSOLUTE_LOW_WINDOW_DAYS_OPTIONS,
     DEFAULT_CONTINUOUS_CONTROL_ENABLED,
     DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
     DEFAULT_RLS_FORGETTING_FACTOR,
@@ -197,6 +199,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._price_penalty_curve: str = self._options[CONF_PRICE_PENALTY_CURVE]
         self._price_baseline_window_hours: int = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
         self._price_absolute_low_threshold = self._options[CONF_PRICE_ABSOLUTE_LOW_THRESHOLD]
+        self._price_absolute_low_window_days: int = self._options[CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS]
         self._continuous_control_enabled: bool = self._options[CONF_CONTINUOUS_CONTROL_ENABLED]
         self._continuous_control_window_hours: float = self._options[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS]
         self._control_interval: int = self._options[CONF_CONTROL_INTERVAL_MINUTES]
@@ -1216,6 +1219,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._price_penalty_curve = self._options[CONF_PRICE_PENALTY_CURVE]
         self._price_baseline_window_hours = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
         self._price_absolute_low_threshold = self._options[CONF_PRICE_ABSOLUTE_LOW_THRESHOLD]
+        self._price_absolute_low_window_days = self._options[CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS]
         self._continuous_control_enabled = self._options[CONF_CONTINUOUS_CONTROL_ENABLED]
         self._continuous_control_window_hours = self._options[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS]
         self._control_interval = self._options[CONF_CONTROL_INTERVAL_MINUTES]
@@ -1862,6 +1866,15 @@ class MpcHeatPumpClimate(ClimateEntity):
         if price_baseline_window not in PRICE_BASELINE_WINDOW_OPTIONS:
             price_baseline_window = DEFAULT_PRICE_BASELINE_WINDOW_HOURS
 
+        absolute_low_window_raw = options.get(
+            CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS, DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS
+        )
+        absolute_low_window_days = self._coerce_int(
+            absolute_low_window_raw, DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS, minimum=1
+        )
+        if absolute_low_window_days not in PRICE_ABSOLUTE_LOW_WINDOW_DAYS_OPTIONS:
+            absolute_low_window_days = DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS
+
         absolute_low_raw = options.get(
             CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
         )
@@ -1951,6 +1964,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             CONF_PRICE_PENALTY_CURVE: price_penalty_curve,
             CONF_PRICE_BASELINE_WINDOW_HOURS: price_baseline_window,
             CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: absolute_low_threshold,
+            CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: absolute_low_window_days,
             CONF_CONTINUOUS_CONTROL_ENABLED: continuous_enabled,
             CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: continuous_window,
             CONF_CONTROL_INTERVAL_MINUTES: control_interval,
@@ -2574,12 +2588,13 @@ class MpcHeatPumpClimate(ClimateEntity):
             if normalized == PRICE_ABSOLUTE_LOW_THRESHOLD_OFF:
                 return None, "off", {}
             if normalized == PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO:
+                window_hours = int(self._price_absolute_low_window_days) * 24
                 threshold, details = compute_absolute_low_price_threshold(
                     history=self._price_history,
                     time_step_hours=self._controller.time_step_hours,
-                    window_hours=PRICE_ABSOLUTE_LOW_WINDOW_HOURS,
+                    window_hours=window_hours,
                 )
-                return threshold, "auto_30d_median", details
+                return threshold, f"auto_{self._price_absolute_low_window_days}d_median", details
         try:
             value = float(raw)
         except (TypeError, ValueError):

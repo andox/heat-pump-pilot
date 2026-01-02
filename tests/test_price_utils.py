@@ -97,6 +97,17 @@ def test_absolute_low_threshold_from_history() -> None:
     assert details["history_samples"] == 3
 
 
+def test_absolute_low_threshold_respects_window() -> None:
+    history = list(range(1, 101))
+    threshold, details = compute_absolute_low_price_threshold(
+        history=history,
+        time_step_hours=1.0,
+        window_hours=24,
+    )
+    assert threshold == pytest.approx(88.5)
+    assert details["history_samples"] == 24
+
+
 def test_classification_caps_at_normal_when_absolute_low() -> None:
     ratio, label = classify_price(0.5, 0.25, absolute_low_threshold=0.6)
     assert ratio == pytest.approx(2.0)
