@@ -81,7 +81,7 @@ Core control:
 - Monitor only (default: false): true to disable control actions.
 
 Virtual outdoor control:
-- Virtual outdoor heat offset (default: 5.0°C): how much colder to request when heating; start at 3–8°C.
+- Virtual outdoor heat offset (default: 10.0°C): how much colder to request when heating; start at 6–12°C.
 - Overshoot warm bias enabled (default: true): warm bias when predicted above target; also boosts MPC comfort penalty when above target.
 - Overshoot warm bias curve (default: linear): shape of the back-off ramp; options are linear, quadratic, cubic, sqrt.
 - Overshoot warm bias min/max: derived from the heat offset: min = 0, max = virtual_outdoor_heat_offset.
