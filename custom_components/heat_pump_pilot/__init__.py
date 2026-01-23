@@ -49,6 +49,10 @@ except ModuleNotFoundError:  # pragma: no cover - allows unit tests without HA i
             async def async_unload_platforms(entry, platforms):
                 return True
 
+            @staticmethod
+            async def async_reload(entry_id):
+                return None
+
     class Platform(str, Enum):  # type: ignore[misc]
         """Minimal enum fallback mirroring the HA constant."""
 
@@ -61,9 +65,19 @@ except ModuleNotFoundError:  # pragma: no cover - allows unit tests without HA i
         return None
 
 try:
-    from .const import DOMAIN, SIGNAL_OPTIONS_UPDATED
+    from .const import (
+        CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+        DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+        DOMAIN,
+        SIGNAL_OPTIONS_UPDATED,
+    )
 except ImportError:  # pragma: no cover - allows direct test imports
-    from const import DOMAIN, SIGNAL_OPTIONS_UPDATED
+    from const import (
+        CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+        DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+        DOMAIN,
+        SIGNAL_OPTIONS_UPDATED,
+    )
 
 PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR, Platform.BINARY_SENSOR]
 
@@ -71,7 +85,7 @@ PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR, Platform.BINARY_
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Heat Pump Pilot from a config entry."""
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = {}
+    hass.data[DOMAIN][entry.entry_id] = {"options": dict(entry.options)}
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -93,4 +107,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options update by notifying entities."""
+    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+    previous_options = entry_data.get("options", {})
+    entry_data["options"] = dict(entry.options)
+    previous_trace_enabled = bool(
+        previous_options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
+    )
+    current_trace_enabled = bool(
+        entry.options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
+    )
+    if previous_trace_enabled != current_trace_enabled:
+        await hass.config_entries.async_reload(entry.entry_id)
+        return
     async_dispatcher_send(hass, f"{SIGNAL_OPTIONS_UPDATED}_{entry.entry_id}")

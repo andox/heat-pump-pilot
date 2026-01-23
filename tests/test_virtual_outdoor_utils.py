@@ -117,7 +117,7 @@ def test_overshoot_warm_bias_curves_shape() -> None:
         curve="sqrt",
     )
 
-    assert min_bias == 4.0
+    assert min_bias == 0.0
     assert max_bias == 8.0
     assert bias_linear == max_bias
     assert min_bias < bias_quadratic < bias_linear

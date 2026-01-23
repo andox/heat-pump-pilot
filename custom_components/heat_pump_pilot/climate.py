@@ -47,6 +47,8 @@ from .const import (
     CONF_OUTDOOR_TEMP,
     CONF_OVERSHOOT_WARM_BIAS_ENABLED,
     CONF_OVERSHOOT_WARM_BIAS_CURVE,
+    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
@@ -59,6 +61,9 @@ from .const import (
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
     CONF_WEATHER_FORECAST_ENTITY,
     CONF_HEAT_LOSS_COEFFICIENT,
     CONF_PERFORMANCE_WINDOW_HOURS,
@@ -78,12 +83,17 @@ from .const import (
     DEFAULT_PREDICTION_HORIZON_HOURS,
     DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
     DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
+    DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+    DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
     DEFAULT_PRICE_COMFORT_WEIGHT,
     DEFAULT_PRICE_RATIO_CAP,
     DEFAULT_PRICE_PENALTY_CURVE,
     DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
     DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD,
     DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
+    DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+    DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+    DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
     PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO,
     PRICE_ABSOLUTE_LOW_THRESHOLD_OFF,
     PRICE_ABSOLUTE_LOW_WINDOW_DAYS_OPTIONS,
@@ -94,6 +104,7 @@ from .const import (
     DEFAULT_THERMAL_RESPONSE_SEED,
     DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
     DEFAULT_HEAT_LOSS_COEFFICIENT,
+    VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES,
     DOMAIN,
     LEARNING_MODEL_EKF,
     LEARNING_MODEL_RLS,
@@ -142,6 +153,7 @@ PARALLEL_UPDATES = 1
 VIRTUAL_OUTDOOR_IDLE_FALLBACK = 10.0
 MAX_VIRTUAL_OUTDOOR = 25.0
 PRICE_HISTORY_MAX_ENTRIES = 2880  # ~30d at 15-minute sampling.
+DECISION_SERIES_MAX_ENTRIES = 192  # Keep decision attributes under recorder size limits.
 THERMAL_PERSIST_INTERVAL = timedelta(minutes=15)
 
 NOTIFY_HEALTH_COOLDOWN = timedelta(hours=1)
@@ -231,11 +243,38 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._overshoot_warm_bias_curve: str = str(
             self._options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
         )
+        self._overshoot_warm_bias_hysteresis_enabled: bool = bool(
+            self._options.get(
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+            )
+        )
+        self._overshoot_warm_bias_hysteresis: float = float(
+            self._options.get(
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+            )
+        )
+        self._virtual_outdoor_smoothing_enabled: bool = bool(
+            self._options.get(
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+            )
+        )
+        self._virtual_outdoor_smoothing_alpha: float = float(
+            self._options.get(
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+            )
+        )
         self._learning_supply_temp_on_margin: float = float(
             self._options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN)
         )
         self._learning_supply_temp_off_margin: float = float(
             self._options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN)
+        )
+        self._virtual_outdoor_trace_enabled: bool = bool(
+            self._options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
         )
         self._thermal_model = self._build_thermal_model(self._options)
         self._thermal_store = ThermalModelStorage(
@@ -276,7 +315,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._last_absolute_low_threshold_value: float | None = None
         self._last_duty_ratio: float | None = None
         self._last_virtual_outdoor_shift: float | None = None
+        self._last_virtual_outdoor_raw: float | None = None
         self._last_virtual_outdoor: float | None = None
+        self._last_overshoot_bias_delta: float | None = None
+        self._overshoot_warm_bias_active: bool | None = None
         self._price_history: list[float] = []
         self._last_price_bucket_start = None
         self._price_history_source = "live"
@@ -675,6 +717,7 @@ class MpcHeatPumpClimate(ClimateEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose last MPC decision and forecasts."""
         suggested_virtual_outdoor_temperature = self._last_virtual_outdoor
+        suggested_virtual_outdoor_temperature_raw = self._last_virtual_outdoor_raw
         last_control_time = (
             self._last_control_time.isoformat(timespec="milliseconds") if self._last_control_time else None
         )
@@ -708,6 +751,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         return {
             "suggested_heat_on": self._last_control_on,
             "suggested_virtual_outdoor_temperature": suggested_virtual_outdoor_temperature,
+            "suggested_virtual_outdoor_temperature_raw": suggested_virtual_outdoor_temperature_raw,
             "last_control_time": last_control_time,
             "control_interval_minutes": self._control_interval,
             "prediction_horizon_hours": self._prediction_horizon,
@@ -727,8 +771,12 @@ class MpcHeatPumpClimate(ClimateEntity):
             "continuous_control_window_hours": self._continuous_control_window_hours,
             "continuous_control_duty_ratio": self._last_duty_ratio,
             "continuous_control_virtual_outdoor_shift": self._last_virtual_outdoor_shift,
+            "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
+            "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
             "monitor_only": self._monitor_only,
             "virtual_outdoor_heat_offset": self._virtual_heat_offset,
+            "overshoot_warm_bias_hysteresis_enabled": self._overshoot_warm_bias_hysteresis_enabled,
+            "overshoot_warm_bias_hysteresis": self._overshoot_warm_bias_hysteresis,
             "heat_loss_coefficient": self._heat_loss_coeff,
             "estimated_heat_loss_coefficient": self._thermal_model.heat_loss_coeff,
             "estimated_heat_gain_coefficient": self._thermal_model.heat_gain_coeff,
@@ -804,6 +852,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             now = dt_util.utcnow()
             self._last_control_on = False
             self._last_virtual_outdoor = None
+            self._last_virtual_outdoor_raw = None
+            self._last_overshoot_bias_delta = None
+            self._overshoot_warm_bias_active = None
             self._publish_decision()
             await self._async_update_notifications(now)
             self.async_write_ha_state()
@@ -1249,11 +1300,38 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._overshoot_warm_bias_curve = str(
             self._options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
         )
+        self._overshoot_warm_bias_hysteresis_enabled = bool(
+            self._options.get(
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+            )
+        )
+        self._overshoot_warm_bias_hysteresis = float(
+            self._options.get(
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+            )
+        )
+        self._virtual_outdoor_smoothing_enabled = bool(
+            self._options.get(
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+            )
+        )
+        self._virtual_outdoor_smoothing_alpha = float(
+            self._options.get(
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+            )
+        )
         self._learning_supply_temp_on_margin = float(
             self._options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN)
         )
         self._learning_supply_temp_off_margin = float(
             self._options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN)
+        )
+        self._virtual_outdoor_trace_enabled = bool(
+            self._options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
         )
         self._performance_window_hours = self._options[CONF_PERFORMANCE_WINDOW_HOURS]
         now = dt_util.utcnow()
@@ -1460,6 +1538,70 @@ class MpcHeatPumpClimate(ClimateEntity):
         await self.hass.services.async_call(domain, "turn_on", {"entity_id": entity_id}, blocking=False)
         return True
 
+    def _adjust_predicted_temp_for_overshoot_bias(self, predicted_temp: float | None) -> float | None:
+        """Apply overshoot hysteresis and return a temperature for bias calculations."""
+        if predicted_temp is None:
+            self._last_overshoot_bias_delta = None
+            return None
+        if not self._overshoot_warm_bias_enabled:
+            try:
+                self._last_overshoot_bias_delta = float(predicted_temp) - float(self._target_temperature)
+            except (TypeError, ValueError):
+                self._last_overshoot_bias_delta = None
+            self._overshoot_warm_bias_active = False
+            return predicted_temp
+        try:
+            target = float(self._target_temperature)
+            overshoot = float(predicted_temp) - target
+            tolerance = max(0.0, float(self._comfort_tolerance))
+        except (TypeError, ValueError):
+            self._last_overshoot_bias_delta = None
+            return predicted_temp
+
+        hysteresis_enabled = bool(self._overshoot_warm_bias_hysteresis_enabled)
+        try:
+            hysteresis = max(0.0, float(self._overshoot_warm_bias_hysteresis))
+        except (TypeError, ValueError):
+            hysteresis = 0.0
+        if not hysteresis_enabled or hysteresis <= 0.0:
+            self._overshoot_warm_bias_active = overshoot > tolerance
+            self._last_overshoot_bias_delta = overshoot
+            return predicted_temp
+
+        upper = tolerance + hysteresis
+        lower = max(0.0, tolerance - hysteresis)
+        active = self._overshoot_warm_bias_active
+        if active is None:
+            active = overshoot > tolerance
+        if active:
+            if overshoot <= lower:
+                active = False
+        else:
+            if overshoot >= upper:
+                active = True
+        self._overshoot_warm_bias_active = active
+        if active:
+            overshoot = max(0.0, overshoot - hysteresis)
+        else:
+            overshoot = min(overshoot, tolerance)
+        self._last_overshoot_bias_delta = overshoot
+        return target + overshoot
+
+    def _apply_virtual_outdoor_smoothing(self, value: float, *, base: float, offset: float) -> float:
+        """Apply EMA smoothing to the virtual outdoor temperature."""
+        if not self._virtual_outdoor_smoothing_enabled:
+            return value
+        last_value = self._last_virtual_outdoor
+        if last_value is None:
+            return value
+        alpha = self._virtual_outdoor_smoothing_alpha
+        smoothed = last_value + alpha * (value - last_value)
+        min_value = base - offset
+        max_value = min(base + offset, MAX_VIRTUAL_OUTDOOR)
+        if min_value > max_value:
+            min_value = max_value
+        return min(max_value, max(min_value, smoothed))
+
     def _compute_virtual_outdoor(
         self, heat_on: bool, outdoor_forecast: list[float], *, duty_ratio: float | None = None
     ) -> float | None:
@@ -1477,8 +1619,9 @@ class MpcHeatPumpClimate(ClimateEntity):
 
         offset = max(0.0, float(self._virtual_heat_offset))
         price_ratio_cap = getattr(self._controller, "price_ratio_cap", DEFAULT_PRICE_RATIO_CAP)
+        adjusted_predicted = self._adjust_predicted_temp_for_overshoot_bias(self._indoor_temp)
         if self._continuous_control_enabled and duty_ratio is not None:
-            value = compute_continuous_virtual_outdoor(
+            raw_value = compute_continuous_virtual_outdoor(
                 base,
                 duty_ratio,
                 virtual_heat_offset=offset,
@@ -1487,21 +1630,23 @@ class MpcHeatPumpClimate(ClimateEntity):
                 price_comfort_weight=self._price_comfort_weight,
                 price_penalty_curve=self._price_penalty_curve,
                 price_ratio_cap=price_ratio_cap,
-                predicted_temp=self._indoor_temp,
+                predicted_temp=adjusted_predicted,
                 target_temperature=self._target_temperature,
                 comfort_temperature_tolerance=self._comfort_tolerance,
                 overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
                 overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
                 max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
             )
+            value = self._apply_virtual_outdoor_smoothing(raw_value, base=base, offset=offset)
+            self._last_virtual_outdoor_raw = raw_value
             self._last_virtual_outdoor_shift = value - base
             return value
 
         if heat_on:
-            value = base - offset
+            raw_value = base - offset
         else:
             # When idle, let the pump see the actual outdoor temp (or a safe fallback).
-            value = base
+            raw_value = base
             if offset > 0:
                 boost_total = compute_idle_warm_bias(
                     price=self._last_price_forecast[0] if self._last_price_forecast else None,
@@ -1509,15 +1654,18 @@ class MpcHeatPumpClimate(ClimateEntity):
                     price_comfort_weight=self._price_comfort_weight,
                     price_penalty_curve=self._price_penalty_curve,
                     price_ratio_cap=price_ratio_cap,
-                    predicted_temp=self._indoor_temp,
+                    predicted_temp=adjusted_predicted,
                     target_temperature=self._target_temperature,
                     comfort_temperature_tolerance=self._comfort_tolerance,
                     overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
                     overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
                     virtual_heat_offset=offset,
                 )
-                value += boost_total
+                raw_value += boost_total
 
+        raw_value = min(raw_value, MAX_VIRTUAL_OUTDOOR)
+        value = self._apply_virtual_outdoor_smoothing(raw_value, base=base, offset=offset)
+        self._last_virtual_outdoor_raw = raw_value
         self._last_virtual_outdoor_shift = value - base
         # Never send a virtual outdoor warmer than 25C (summer/no heat).
         return min(value, MAX_VIRTUAL_OUTDOOR)
@@ -1754,6 +1902,21 @@ class MpcHeatPumpClimate(ClimateEntity):
             normalized = normalized[:steps]
         return normalized
 
+    @staticmethod
+    def _trim_series(values: Sequence[Any] | None, max_entries: int) -> list[Any] | None:
+        """Return a bounded list for recorder-safe attributes."""
+        if values is None:
+            return None
+        try:
+            series = list(values)
+        except TypeError:
+            return None
+        if max_entries <= 0:
+            return []
+        if len(series) > max_entries:
+            return series[-max_entries:]
+        return series
+
     def _extract_price_forecast(self, now) -> list[float]:
         """Extract price forecast from the configured entity."""
         state = self.hass.states.get(self._price_entity)
@@ -1927,6 +2090,27 @@ class MpcHeatPumpClimate(ClimateEntity):
         overshoot_curve = options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
         if overshoot_curve not in OVERSHOOT_WARM_BIAS_CURVES:
             overshoot_curve = DEFAULT_OVERSHOOT_WARM_BIAS_CURVE
+        overshoot_hysteresis_enabled = bool(
+            options.get(
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+            )
+        )
+        overshoot_hysteresis = self._state_to_float(options.get(CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS))
+        if overshoot_hysteresis is None:
+            overshoot_hysteresis = DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS
+        overshoot_hysteresis = max(0.0, float(overshoot_hysteresis))
+
+        smoothing_enabled = bool(
+            options.get(
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+            )
+        )
+        smoothing_alpha = self._state_to_float(options.get(CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA))
+        if smoothing_alpha is None:
+            smoothing_alpha = DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA
+        smoothing_alpha = min(1.0, max(0.0, float(smoothing_alpha)))
 
         learning_on_margin = self._state_to_float(options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN))
         if learning_on_margin is None:
@@ -1976,6 +2160,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             ),
             CONF_OVERSHOOT_WARM_BIAS_ENABLED: overshoot_enabled,
             CONF_OVERSHOOT_WARM_BIAS_CURVE: overshoot_curve,
+            CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED: overshoot_hysteresis_enabled,
+            CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS: overshoot_hysteresis,
             CONF_HEAT_LOSS_COEFFICIENT: options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT),
             CONF_THERMAL_RESPONSE_SEED: options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
             CONF_LEARNING_MODEL: learning_model,
@@ -2000,6 +2186,11 @@ class MpcHeatPumpClimate(ClimateEntity):
             CONF_INITIAL_INDOOR_TEMP: options.get(CONF_INITIAL_INDOOR_TEMP),
             CONF_INITIAL_HEAT_GAIN: options.get(CONF_INITIAL_HEAT_GAIN),
             CONF_INITIAL_HEAT_LOSS_OVERRIDE: options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE),
+            CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED: bool(
+                options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
+            ),
+            CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED: smoothing_enabled,
+            CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA: smoothing_alpha,
         }
         return merged
 
@@ -2072,13 +2263,19 @@ class MpcHeatPumpClimate(ClimateEntity):
             if self._heating_detection_active()
             else ("controlled_entity" if self._controlled_entity else "none")
         )
-        base_outdoor_fallback = (
-            self._outdoor_temp
-            if self._outdoor_temp is not None
-            else (self._last_outdoor_forecast[0] if self._last_outdoor_forecast else self._get_state_as_float(self._outdoor_temp_entity))
-        )
+        base_outdoor_source = None
+        if self._outdoor_temp is not None:
+            base_outdoor_fallback = self._outdoor_temp
+            base_outdoor_source = "outdoor_sensor"
+        elif self._last_outdoor_forecast:
+            base_outdoor_fallback = self._last_outdoor_forecast[0]
+            base_outdoor_source = "outdoor_forecast"
+        else:
+            base_outdoor_fallback = self._get_state_as_float(self._outdoor_temp_entity)
+            base_outdoor_source = "outdoor_sensor_fallback" if base_outdoor_fallback is not None else "fallback"
         if base_outdoor_fallback is None:
             base_outdoor_fallback = VIRTUAL_OUTDOOR_IDLE_FALLBACK
+            base_outdoor_source = "fallback"
         price_ratio_cap = getattr(self._controller, "price_ratio_cap", DEFAULT_PRICE_RATIO_CAP)
         planned_virtual_outdoor = compute_planned_virtual_outdoor_temperatures(
             self._last_result.sequence if self._last_result else None,
@@ -2104,7 +2301,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         payload = {
             "suggested_heat_on": self._last_control_on,
             "suggested_virtual_outdoor_temperature": suggested_virtual_outdoor_temperature,
-            "planned_virtual_outdoor_temperatures": planned_virtual_outdoor,
+            "suggested_virtual_outdoor_temperature_raw": self._last_virtual_outdoor_raw,
+            "planned_virtual_outdoor_temperatures": self._trim_series(
+                planned_virtual_outdoor, DECISION_SERIES_MAX_ENTRIES
+            ),
             "target_temperature": self._target_temperature,
             "monitor_only": self._monitor_only,
             "control_state": "monitoring" if self._monitor_only else "controlling",
@@ -2135,6 +2335,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             "overshoot_warm_bias_max_bias": overshoot_max_bias,
             "overshoot_warm_bias_applied": overshoot_bias,
             "overshoot_warm_bias_multiplier": overshoot_warm_bias_multiplier,
+            "overshoot_warm_bias_hysteresis_enabled": self._overshoot_warm_bias_hysteresis_enabled,
+            "overshoot_warm_bias_hysteresis": self._overshoot_warm_bias_hysteresis,
             "learning_supply_temp_on_margin": self._learning_supply_temp_on_margin,
             "learning_supply_temp_off_margin": self._learning_supply_temp_off_margin,
             "learning_model": self._learning_model,
@@ -2155,17 +2357,63 @@ class MpcHeatPumpClimate(ClimateEntity):
             "continuous_control_window_hours": self._continuous_control_window_hours,
             "continuous_control_duty_ratio": self._last_duty_ratio,
             "continuous_control_virtual_outdoor_shift": self._last_virtual_outdoor_shift,
+            "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
+            "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
             "cost": self._last_result.cost if self._last_result else None,
-            "predicted_temperatures": self._last_result.predicted_temperatures if self._last_result else None,
-            "price_forecast": self._last_price_forecast,
-            "outdoor_forecast": self._last_outdoor_forecast,
-            "price_history": self._price_history,
+            "predicted_temperatures": self._trim_series(
+                self._last_result.predicted_temperatures if self._last_result else None,
+                DECISION_SERIES_MAX_ENTRIES,
+            ),
+            "price_forecast": self._trim_series(self._last_price_forecast, DECISION_SERIES_MAX_ENTRIES),
+            "outdoor_forecast": self._trim_series(self._last_outdoor_forecast, DECISION_SERIES_MAX_ENTRIES),
+            "price_history": self._trim_series(self._price_history, DECISION_SERIES_MAX_ENTRIES),
             "price_history_samples": len(self._price_history),
             "price_history_source": self._price_history_source,
         }
         entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(self.config_entry.entry_id, {})
         entry_data["last_decision"] = payload
         entry_data["performance"] = self._compute_performance_summary(now)
+        if not self._virtual_outdoor_trace_enabled:
+            async_dispatcher_send(
+                self.hass, f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}"
+            )
+            return
+        trace_timestamp = (self._last_control_time or now).isoformat(timespec="milliseconds")
+        trace_entry = {
+            "time": trace_timestamp,
+            "base_outdoor": float(base_outdoor_fallback),
+            "base_source": base_outdoor_source,
+            "virtual_outdoor": suggested_virtual_outdoor_temperature,
+            "virtual_outdoor_raw": self._last_virtual_outdoor_raw,
+            "virtual_outdoor_shift": self._last_virtual_outdoor_shift,
+            "duty_ratio": self._last_duty_ratio,
+            "continuous_control_enabled": self._continuous_control_enabled,
+            "virtual_outdoor_heat_offset": self._virtual_heat_offset,
+            "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
+            "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
+            "overshoot_warm_bias_applied": overshoot_bias,
+            "heat_on": self._last_control_on,
+            "indoor_temperature": self._indoor_temp,
+            "target_temperature": self._target_temperature,
+            "price_ratio": price_ratio_mpc,
+            "price_classification": price_classification_mpc,
+            "current_price": current_price,
+            "price_baseline": self._last_result.price_baseline if self._last_result else None,
+        }
+        trace = entry_data.setdefault("virtual_outdoor_trace", [])
+
+        def _strip_time(entry: dict[str, Any]) -> dict[str, Any]:
+            return {key: value for key, value in entry.items() if key != "time"}
+
+        if trace and (
+            trace[-1].get("time") == trace_timestamp
+            or _strip_time(trace[-1]) == _strip_time(trace_entry)
+        ):
+            trace[-1] = trace_entry
+        else:
+            trace.append(trace_entry)
+            if len(trace) > VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES:
+                del trace[: len(trace) - VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES]
         async_dispatcher_send(self.hass, f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}")
 
     def _comfort_overshoot_multiplier(self) -> tuple[float, float, float, float]:
@@ -2174,7 +2422,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             return 0.0, 1.0, 0.0, 0.0
         if not self._overshoot_warm_bias_enabled:
             return 0.0, 1.0, 0.0, 0.0
-        delta = float(self._indoor_temp) - float(self._target_temperature)
+        delta = self._last_overshoot_bias_delta
+        if delta is None:
+            delta = float(self._indoor_temp) - float(self._target_temperature)
         return compute_overshoot_warm_bias(
             delta,
             self._comfort_tolerance,

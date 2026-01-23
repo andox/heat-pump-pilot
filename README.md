@@ -84,8 +84,12 @@ Virtual outdoor control:
 - Virtual outdoor heat offset (default: 5.0°C): how much colder to request when heating; start at 3–8°C.
 - Overshoot warm bias enabled (default: true): warm bias when predicted above target; also boosts MPC comfort penalty when above target.
 - Overshoot warm bias curve (default: linear): shape of the back-off ramp; options are linear, quadratic, cubic, sqrt.
-- Overshoot warm bias min/max: derived from the heat offset: min = virtual_outdoor_heat_offset / 2, max = virtual_outdoor_heat_offset.
+- Overshoot warm bias min/max: derived from the heat offset: min = 0, max = virtual_outdoor_heat_offset.
   - Curve shapes: linear = proportional ramp; quadratic/cubic = gentle early, stronger near full effect; sqrt = stronger early, gentler later.
+- Overshoot warm bias hysteresis enabled (default: true): adds a deadband around the comfort tolerance to prevent on/off chatter.
+- Overshoot warm bias hysteresis (default: 0.2°C): extra margin above/below the tolerance before the bias toggles.
+- Virtual outdoor smoothing enabled (default: true): apply EMA smoothing to the output temperature.
+- Virtual outdoor smoothing alpha (default: 0.5): 0–1; lower is smoother/slower, higher is more responsive.
 
 Learning:
 - Learning model (default: ekf): ekf is stable; rls can react faster to changes.
@@ -142,12 +146,17 @@ ratio of 0 maps to `outdoor + virtual_heat_offset`, while 1 maps to
 `outdoor - virtual_heat_offset`, with price/overshoot warm-bias blended in.
 When overshoot warm bias is enabled, the MPC comfort penalty becomes asymmetric:
 above-target errors are penalized more strongly once indoor temperature exceeds
-the comfort tolerance. The warm-bias back-off ramps from a minimum of
-`virtual_outdoor_heat_offset / 2` to a maximum of `virtual_outdoor_heat_offset`,
+the comfort tolerance. The warm-bias back-off ramps from a minimum of `0` to a
+maximum of `virtual_outdoor_heat_offset`,
 using the selected curve (linear/quadratic/cubic/sqrt). Below-target penalties
 are unchanged.
 This acts as a back-off when indoor temperature is above target by pushing the
 virtual outdoor higher so the pump is less likely to heat.
+When overshoot hysteresis is enabled, the back-off only activates once the
+indoor temperature exceeds `comfort_tolerance + hysteresis`, and it stays active
+until the temperature drops below `comfort_tolerance - hysteresis`.
+When virtual outdoor smoothing is enabled, the output is EMA-smoothed between
+control runs; use a lower alpha for smoother, slower changes.
 
 ### Creating an outdoor temperature sensor from a weather entity
 If you only have a `weather.*` entity, create a template sensor:
@@ -260,6 +269,8 @@ Key diagnostic sensors:
   `overshoot_warm_bias_enabled`, `overshoot_warm_bias_curve`,
   `overshoot_warm_bias_min_bias`, `overshoot_warm_bias_max_bias`,
   `overshoot_warm_bias_applied`, and `overshoot_warm_bias_multiplier`.
+  Large arrays (price history/forecast, outdoor forecast, planned temps) are capped
+  to the most recent 192 entries to stay under recorder limits.
 - Heat Pump Pilot Health: overall health with reasons (missing sensors, stale control, etc).
 - Curve recommendation (Health attribute): suggests when to raise/lower the heat pump curve
   based on heating detected during idle vs requested heating over the performance window.
@@ -267,6 +278,8 @@ Key diagnostic sensors:
 - Heat Pump Pilot Learning State: learning vs stable, with change ratios and window stats.
 - Heat Pump Pilot Price State: current price classification and baseline details.
 - Heat Pump Pilot Virtual Outdoor: the current virtual outdoor temperature sent to the pump.
+- Heat Pump Pilot Virtual Outdoor Trace: rolling history of recent virtual outdoor decisions
+  (see the `trace` attribute for detailed entries).
 - Heat Pump Pilot Comfort Score: percent of samples within comfort tolerance.
 - Heat Pump Pilot Price Score: how well heating aligns with low prices.
 - Heat Pump Pilot Prediction Accuracy: MAE plus RMSE/bias for predicted indoor temperature.
@@ -369,6 +382,8 @@ cards:
         entity: sensor.heat_pump_pilot_health
         attribute: curve_recommendation
         name: Curve recommendation
+      - entity: sensor.heat_pump_pilot_virtual_outdoor_trace
+        name: Virtual outdoor trace
       - entity: sensor.heat_pump_pilot_control_state
         secondary_info: last-changed
       - entity: sensor.heat_pump_pilot_learning_state

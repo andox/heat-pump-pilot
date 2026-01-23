@@ -30,6 +30,8 @@ from .const import (
     CONF_OUTDOOR_TEMP,
     CONF_OVERSHOOT_WARM_BIAS_ENABLED,
     CONF_OVERSHOOT_WARM_BIAS_CURVE,
+    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
     CONF_PREDICTION_HORIZON_HOURS,
     CONF_PRICE_COMFORT_WEIGHT,
     CONF_PRICE_ENTITY,
@@ -38,10 +40,13 @@ from .const import (
     CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     CONF_CONTINUOUS_CONTROL_ENABLED,
     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
+    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
     CONF_PRICE_PENALTY_CURVE,
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
     CONF_WEATHER_FORECAST_ENTITY,
     CONF_HEAT_LOSS_COEFFICIENT,
     CONF_PERFORMANCE_WINDOW_HOURS,
@@ -62,6 +67,9 @@ from .const import (
     DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     DEFAULT_CONTINUOUS_CONTROL_ENABLED,
     DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
+    DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+    DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+    DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
     DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
@@ -73,6 +81,8 @@ from .const import (
     DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD,
     DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
     DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
+    DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+    DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
     DOMAIN,
     LEARNING_MODEL_EKF,
     LEARNING_MODEL_RLS,
@@ -118,8 +128,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
                 CONF_CONTINUOUS_CONTROL_ENABLED: DEFAULT_CONTINUOUS_CONTROL_ENABLED,
                 CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
+                CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED: DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
                 CONF_OVERSHOOT_WARM_BIAS_CURVE: DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS: DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED: DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA: DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
                 CONF_HEAT_LOSS_COEFFICIENT: DEFAULT_HEAT_LOSS_COEFFICIENT,
                 CONF_THERMAL_RESPONSE_SEED: DEFAULT_THERMAL_RESPONSE_SEED,
                 CONF_LEARNING_MODEL: user_input.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
@@ -271,11 +286,30 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: user_input.get(
                     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS, DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
                 ),
+                CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED: user_input.get(
+                    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED
+                ),
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: user_input.get(
                     CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED
                 ),
                 CONF_OVERSHOOT_WARM_BIAS_CURVE: user_input.get(
                     CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE
+                ),
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED: user_input.get(
+                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                    DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                ),
+                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS: user_input.get(
+                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                    DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                ),
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED: user_input.get(
+                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                    DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                ),
+                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA: user_input.get(
+                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                    DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
                 ),
                 CONF_HEAT_LOSS_COEFFICIENT: user_input[CONF_HEAT_LOSS_COEFFICIENT],
                 CONF_THERMAL_RESPONSE_SEED: user_input[CONF_THERMAL_RESPONSE_SEED],
@@ -422,6 +456,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     )
                 ),
                 vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+                    default=options.get(
+                        CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+                        DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+                    ),
+                ): selector.BooleanSelector(),
+                vol.Required(
                     CONF_CONTROL_INTERVAL_MINUTES,
                     default=options.get(CONF_CONTROL_INTERVAL_MINUTES, DEFAULT_CONTROL_INTERVAL_MINUTES),
                 ): selector.NumberSelector(
@@ -515,6 +556,49 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     selector.SelectSelectorConfig(
                         options=list(OVERSHOOT_WARM_BIAS_CURVES),
                         mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                    default=options.get(
+                        CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                        DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                    ),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                    default=options.get(
+                        CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                        DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=2.0,
+                        step=0.05,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                    default=options.get(
+                        CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                        DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                    ),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                    default=options.get(
+                        CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                        DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=1.0,
+                        step=0.05,
+                        mode=selector.NumberSelectorMode.SLIDER,
                     )
                 ),
                 vol.Required(

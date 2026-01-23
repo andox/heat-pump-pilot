@@ -328,7 +328,7 @@ def compute_overshoot_warm_bias(
     except (TypeError, ValueError):
         tol = 0.0
 
-    min_bias = 0.5 * offset
+    min_bias = 0.0
     max_bias = offset
 
     if overshoot <= tol:

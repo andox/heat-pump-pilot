@@ -10,24 +10,34 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import EntityCategory
 
-from .const import DOMAIN, SIGNAL_DECISION_UPDATED
+from .const import (
+    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+    DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+    DOMAIN,
+    SIGNAL_DECISION_UPDATED,
+    VIRTUAL_OUTDOOR_TRACE_ATTRIBUTE_MAX_ENTRIES,
+    VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES,
+)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
     """Set up sensors for a config entry."""
-    async_add_entities(
-        [
-            MpcHeatPumpDecisionSensor(hass, entry),
-            MpcHeatPumpHealthSensor(hass, entry),
-            MpcHeatPumpControlStateSensor(hass, entry),
-            MpcHeatPumpLearningStateSensor(hass, entry),
-            MpcHeatPumpPriceStateSensor(hass, entry),
-            MpcHeatPumpVirtualOutdoorSensor(hass, entry),
-            MpcHeatPumpComfortScoreSensor(hass, entry),
-            MpcHeatPumpPriceScoreSensor(hass, entry),
-            MpcHeatPumpPredictionAccuracySensor(hass, entry),
-        ]
-    )
+    entities: list[SensorEntity] = [
+        MpcHeatPumpDecisionSensor(hass, entry),
+        MpcHeatPumpHealthSensor(hass, entry),
+        MpcHeatPumpControlStateSensor(hass, entry),
+        MpcHeatPumpLearningStateSensor(hass, entry),
+        MpcHeatPumpPriceStateSensor(hass, entry),
+        MpcHeatPumpVirtualOutdoorSensor(hass, entry),
+        MpcHeatPumpComfortScoreSensor(hass, entry),
+        MpcHeatPumpPriceScoreSensor(hass, entry),
+        MpcHeatPumpPredictionAccuracySensor(hass, entry),
+    ]
+    if bool(
+        entry.options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
+    ):
+        entities.append(MpcHeatPumpVirtualOutdoorTraceSensor(hass, entry))
+    async_add_entities(entities)
 
 
 class _MpcHeatPumpBaseSensor(SensorEntity):
@@ -274,6 +284,74 @@ class MpcHeatPumpVirtualOutdoorSensor(_MpcHeatPumpBaseSensor):
             return float(value)
         except (TypeError, ValueError):
             return None
+
+
+class MpcHeatPumpVirtualOutdoorTraceSensor(SensorEntity):
+    """Expose recent virtual outdoor decisions for diagnostics."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_should_poll = False
+    _attr_icon = "mdi:chart-timeline-variant"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self.config_entry = entry
+        self._trace: list[dict[str, Any]] = []
+        self._unsub = None
+        self._attr_name = "Heat Pump Pilot Virtual Outdoor Trace"
+        self._attr_unique_id = f"{entry.entry_id}_virtual_outdoor_trace"
+
+    async def async_added_to_hass(self) -> None:
+        """Register for updates."""
+        self._trace = self._get_entry_state()
+        self._unsub = async_dispatcher_connect(
+            self.hass,
+            f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}",
+            self._handle_update,
+        )
+        if self._unsub:
+            self.async_on_remove(self._unsub)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Clean up listeners."""
+        if self._unsub:
+            self._unsub()
+
+    @callback
+    def _handle_update(self) -> None:
+        """Receive trace updates from the climate entity."""
+        self._trace = self._get_entry_state()
+        self.async_write_ha_state()
+
+    def _get_entry_state(self) -> list[dict[str, Any]]:
+        """Fetch the trace stored for this entry."""
+        return (
+            self.hass.data.get(DOMAIN, {})
+            .get(self.config_entry.entry_id, {})
+            .get("virtual_outdoor_trace", [])
+        )
+
+    @property
+    def native_value(self) -> int | None:
+        if self._trace is None:
+            return None
+        return len(self._trace)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        trace = self._trace or []
+        if len(trace) > VIRTUAL_OUTDOOR_TRACE_ATTRIBUTE_MAX_ENTRIES:
+            trace_view = trace[-VIRTUAL_OUTDOOR_TRACE_ATTRIBUTE_MAX_ENTRIES :]
+            truncated = True
+        else:
+            trace_view = trace
+            truncated = False
+        return {
+            "samples": len(trace),
+            "max_samples": VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES,
+            "trace": trace_view,
+            "trace_truncated": truncated,
+        }
 
 
 class MpcHeatPumpComfortScoreSensor(_MpcHeatPumpPerformanceSensor):
