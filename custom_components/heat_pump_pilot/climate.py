@@ -61,6 +61,7 @@ from .const import (
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+    CONF_VIRTUAL_OUTDOOR_MIN_TEMP,
     CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
     CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
     CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
@@ -103,6 +104,7 @@ from .const import (
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
     DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+    DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP,
     DEFAULT_HEAT_LOSS_COEFFICIENT,
     VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES,
     DOMAIN,
@@ -219,6 +221,9 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._comfort_tolerance: float = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
         self._monitor_only: bool = self._options[CONF_MONITOR_ONLY]
         self._virtual_heat_offset: float = self._options[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET]
+        self._virtual_outdoor_min_temp: float = float(
+            self._options.get(CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP)
+        )
         self._heat_loss_coeff: float = self._options[CONF_HEAT_LOSS_COEFFICIENT]
         self._learning_model: str = self._options[CONF_LEARNING_MODEL]
         self._rls_forgetting_factor: float = self._options[CONF_RLS_FORGETTING_FACTOR]
@@ -775,6 +780,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
             "monitor_only": self._monitor_only,
             "virtual_outdoor_heat_offset": self._virtual_heat_offset,
+            "virtual_outdoor_min_temp": self._virtual_outdoor_min_temp,
             "overshoot_warm_bias_hysteresis_enabled": self._overshoot_warm_bias_hysteresis_enabled,
             "overshoot_warm_bias_hysteresis": self._overshoot_warm_bias_hysteresis,
             "heat_loss_coefficient": self._heat_loss_coeff,
@@ -1278,6 +1284,9 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._comfort_tolerance = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
         self._monitor_only = self._options[CONF_MONITOR_ONLY]
         self._virtual_heat_offset = self._options[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET]
+        self._virtual_outdoor_min_temp = float(
+            self._options.get(CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP)
+        )
         self._learning_model = self._options[CONF_LEARNING_MODEL]
         self._rls_forgetting_factor = self._options[CONF_RLS_FORGETTING_FACTOR]
         self._learning_window_hours = self._options[CONF_LEARNING_WINDOW_HOURS]
@@ -1602,6 +1611,16 @@ class MpcHeatPumpClimate(ClimateEntity):
             min_value = max_value
         return min(max_value, max(min_value, smoothed))
 
+    def _apply_virtual_outdoor_min_temp(self, value: float, *, base: float) -> float:
+        """Clamp virtual outdoor to a minimum unless outdoor temp is lower."""
+        try:
+            minimum = float(self._virtual_outdoor_min_temp)
+        except (TypeError, ValueError):
+            return value
+        if base < minimum:
+            return value
+        return max(minimum, value)
+
     def _compute_virtual_outdoor(
         self, heat_on: bool, outdoor_forecast: list[float], *, duty_ratio: float | None = None
     ) -> float | None:
@@ -1637,7 +1656,9 @@ class MpcHeatPumpClimate(ClimateEntity):
                 overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
                 max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
             )
+            raw_value = self._apply_virtual_outdoor_min_temp(raw_value, base=base)
             value = self._apply_virtual_outdoor_smoothing(raw_value, base=base, offset=offset)
+            value = self._apply_virtual_outdoor_min_temp(value, base=base)
             self._last_virtual_outdoor_raw = raw_value
             self._last_virtual_outdoor_shift = value - base
             return value
@@ -1664,7 +1685,9 @@ class MpcHeatPumpClimate(ClimateEntity):
                 raw_value += boost_total
 
         raw_value = min(raw_value, MAX_VIRTUAL_OUTDOOR)
+        raw_value = self._apply_virtual_outdoor_min_temp(raw_value, base=base)
         value = self._apply_virtual_outdoor_smoothing(raw_value, base=base, offset=offset)
+        value = self._apply_virtual_outdoor_min_temp(value, base=base)
         self._last_virtual_outdoor_raw = raw_value
         self._last_virtual_outdoor_shift = value - base
         # Never send a virtual outdoor warmer than 25C (summer/no heat).
@@ -2158,6 +2181,9 @@ class MpcHeatPumpClimate(ClimateEntity):
             CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: options.get(
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET, DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET
             ),
+            CONF_VIRTUAL_OUTDOOR_MIN_TEMP: options.get(
+                CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP
+            ),
             CONF_OVERSHOOT_WARM_BIAS_ENABLED: overshoot_enabled,
             CONF_OVERSHOOT_WARM_BIAS_CURVE: overshoot_curve,
             CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED: overshoot_hysteresis_enabled,
@@ -2284,6 +2310,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             predicted_temperatures=self._last_result.predicted_temperatures if self._last_result else None,
             base_outdoor_fallback=float(base_outdoor_fallback),
             virtual_heat_offset=self._virtual_heat_offset,
+            virtual_outdoor_min_temp=self._virtual_outdoor_min_temp,
+            allow_below_min_when_outdoor_lower=True,
             price_comfort_weight=self._price_comfort_weight,
             price_baseline=self._last_result.price_baseline if self._last_result else None,
             price_penalty_curve=self._price_penalty_curve,
@@ -2329,6 +2357,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             "heating_supply_temperature": heating_supply_temperature,
             "heating_duty_cycle_ratio": heating_duty_cycle_ratio,
             "virtual_outdoor_heat_offset": self._virtual_heat_offset,
+            "virtual_outdoor_min_temp": self._virtual_outdoor_min_temp,
             "overshoot_warm_bias_enabled": self._overshoot_warm_bias_enabled,
             "overshoot_warm_bias_curve": self._overshoot_warm_bias_curve,
             "overshoot_warm_bias_min_bias": overshoot_min_bias,
@@ -2389,6 +2418,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             "duty_ratio": self._last_duty_ratio,
             "continuous_control_enabled": self._continuous_control_enabled,
             "virtual_outdoor_heat_offset": self._virtual_heat_offset,
+            "virtual_outdoor_min_temp": self._virtual_outdoor_min_temp,
             "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
             "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
             "overshoot_warm_bias_applied": overshoot_bias,

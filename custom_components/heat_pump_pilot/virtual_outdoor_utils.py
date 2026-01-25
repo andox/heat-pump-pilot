@@ -51,6 +51,8 @@ def compute_planned_virtual_outdoor_temperatures(
     predicted_temperatures: Sequence[float] | None = None,
     base_outdoor_fallback: float,
     virtual_heat_offset: float,
+    virtual_outdoor_min_temp: float | None = None,
+    allow_below_min_when_outdoor_lower: bool = True,
     price_comfort_weight: float,
     price_baseline: float | None,
     comfort_temperature_tolerance: float,
@@ -89,6 +91,11 @@ def compute_planned_virtual_outdoor_temperatures(
         offset = float(virtual_heat_offset)
     except (TypeError, ValueError):
         offset = 0.0
+
+    try:
+        min_temp = float(virtual_outdoor_min_temp) if virtual_outdoor_min_temp is not None else None
+    except (TypeError, ValueError):
+        min_temp = None
 
     try:
         weight = float(price_comfort_weight)
@@ -140,6 +147,8 @@ def compute_planned_virtual_outdoor_temperatures(
                 overshoot_warm_bias_curve=overshoot_warm_bias_curve,
                 max_virtual_outdoor=max_virtual_outdoor,
             )
+            if min_temp is not None and (not allow_below_min_when_outdoor_lower or base >= min_temp):
+                value = max(min_temp, value)
             planned.append(value)
             continue
 
@@ -161,7 +170,10 @@ def compute_planned_virtual_outdoor_temperatures(
             )
             value += boost_total
 
-        planned.append(min(value, max_virtual_outdoor))
+        value = min(value, max_virtual_outdoor)
+        if min_temp is not None and (not allow_below_min_when_outdoor_lower or base >= min_temp):
+            value = max(min_temp, value)
+        planned.append(value)
 
     return planned
 

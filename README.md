@@ -82,6 +82,7 @@ Core control:
 
 Virtual outdoor control:
 - Virtual outdoor heat offset (default: 10.0°C): how much colder to request when heating; start at 6–12°C.
+- Virtual outdoor minimum (default: -15.0°C): never send a lower virtual outdoor temperature unless the actual outdoor temperature is already below this.
 - Overshoot warm bias enabled (default: true): warm bias when predicted above target; also boosts MPC comfort penalty when above target.
 - Overshoot warm bias curve (default: linear): shape of the back-off ramp; options are linear, quadratic, cubic, sqrt.
 - Overshoot warm bias min/max: derived from the heat offset: min = 0, max = virtual_outdoor_heat_offset.
@@ -140,6 +141,9 @@ controlled entity. The mapping is:
 - If idle: `virtual = outdoor + warm_bias`, where warm_bias depends on price and
   (optionally) indoor overshoot. Warm bias is capped by `virtual_heat_offset`.
 - A hard cap of 25C prevents pushing the pump into summer/no-heat mode.
+If **Virtual outdoor minimum** is configured, the controller will not send a
+virtual outdoor temperature below that minimum unless the actual outdoor
+temperature is already lower.
 When **continuous control** is enabled, the controller smooths the virtual
 outdoor temperature based on the planned duty ratio over a short window. A
 ratio of 0 maps to `outdoor + virtual_heat_offset`, while 1 maps to

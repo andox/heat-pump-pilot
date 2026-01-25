@@ -45,6 +45,7 @@ from .const import (
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+    CONF_VIRTUAL_OUTDOOR_MIN_TEMP,
     CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
     CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
     CONF_WEATHER_FORECAST_ENTITY,
@@ -74,6 +75,7 @@ from .const import (
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
     DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+    DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP,
     DEFAULT_HEAT_LOSS_COEFFICIENT,
     DEFAULT_HEATING_DETECTION_ENABLED,
     DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS,
@@ -122,6 +124,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_COMFORT_TEMPERATURE_TOLERANCE: DEFAULT_COMFORT_TEMPERATURE_TOLERANCE,
                 CONF_MONITOR_ONLY: user_input.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+                CONF_VIRTUAL_OUTDOOR_MIN_TEMP: DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP,
                 CONF_PRICE_PENALTY_CURVE: DEFAULT_PRICE_PENALTY_CURVE,
                 CONF_PRICE_BASELINE_WINDOW_HOURS: DEFAULT_PRICE_BASELINE_WINDOW_HOURS,
                 CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD,
@@ -268,6 +271,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_COMFORT_TEMPERATURE_TOLERANCE: user_input[CONF_COMFORT_TEMPERATURE_TOLERANCE],
                 CONF_MONITOR_ONLY: user_input[CONF_MONITOR_ONLY],
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: user_input[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET],
+                CONF_VIRTUAL_OUTDOOR_MIN_TEMP: user_input.get(
+                    CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP
+                ),
                 CONF_PRICE_PENALTY_CURVE: user_input.get(
                     CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE
                 ),
@@ -531,6 +537,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     selector.NumberSelectorConfig(
                         min=0,
                         max=15,
+                        step=0.5,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_MIN_TEMP,
+                    default=options.get(CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=-40,
+                        max=10,
                         step=0.5,
                         unit_of_measurement="°C",
                         mode=selector.NumberSelectorMode.BOX,
