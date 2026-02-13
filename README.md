@@ -200,7 +200,7 @@ At each step:
 1. Predict the next temperature using the current coefficients.
 2. Compute the innovation from the measured temperature.
 3. Update the coefficients and covariance, with process/measurement noise.
-4. Clamp coefficients to safe ranges.
+4. Clamp coefficients to safe ranges (`heat_loss_coeff` 0.001–0.25, `heat_gain_coeff` 0.1–1.5).
 
 ### RLS model
 The RLS model estimates `[heat_gain_coeff, heat_loss_coeff]` from the change in
@@ -208,7 +208,7 @@ temperature:
 - Uses a forgetting factor (0.90 to 1.00, default 0.99).
 - Updates on each sample using `dT = measured - last_temp`.
 - Decouples cross-covariance when heating is off to avoid gain drift.
-- Clamps coefficients to safe ranges.
+- Clamps coefficients to safe ranges (`heat_loss_coeff` 0.001–0.25, `heat_gain_coeff` 0.1–1.5).
 
 ### Learning state
 Learning state uses a rolling window of model history (default 12 h):

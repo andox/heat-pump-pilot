@@ -172,6 +172,13 @@ def test_observe_temperature_updates_only_temp() -> None:
     assert estimator.heat_gain_coeff == pytest.approx(before_gain)
 
 
+def test_thermal_model_accepts_low_heat_loss_values() -> None:
+    """Estimator should support low-loss homes below the previous 0.005 floor."""
+    estimator = ThermalModelEstimator(seed=0.5, initial_heat_loss=0.0015, initial_heat_gain=0.4, initial_temp=20.0)
+    assert estimator.heat_loss_coeff == pytest.approx(0.0015)
+    assert estimator.heat_loss_coeff < 0.005
+
+
 def test_price_history_baseline_reduces_peak_cost() -> None:
     """Past expensive prices should reduce the relative penalty of moderate upcoming prices."""
     controller = MpcController(

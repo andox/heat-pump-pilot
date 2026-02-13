@@ -13,7 +13,9 @@ from typing import Any
 LOGGER = logging.getLogger(__name__)
 
 # Bounds for the learned parameters.
-MIN_HEAT_LOSS = 0.005
+# Lower floor allows slow-loss buildings to be modeled without forcing
+# unrealistically fast cooling in cold weather forecasts.
+MIN_HEAT_LOSS = 0.001
 MAX_HEAT_LOSS = 0.25
 MIN_HEAT_GAIN = 0.1
 MAX_HEAT_GAIN = 1.5
