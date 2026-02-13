@@ -163,6 +163,23 @@ def test_continuous_virtual_outdoor_bounds() -> None:
     assert value_full == 5.0
 
 
+def test_continuous_virtual_outdoor_no_backoff_during_partial_heating() -> None:
+    value = compute_continuous_virtual_outdoor(
+        10.0,
+        0.2,
+        virtual_heat_offset=5.0,
+        price=3.0,
+        price_baseline=1.0,
+        price_comfort_weight=1.0,
+        predicted_temp=22.0,
+        target_temperature=20.0,
+        comfort_temperature_tolerance=0.5,
+        overshoot_warm_bias_enabled=True,
+    )
+    # Without backoff, ratio=0.2 maps directly to base + offset*(1 - 2*ratio) = 13.0.
+    assert value == 13.0
+
+
 def test_planned_virtual_outdoor_continuous_mode() -> None:
     planned = compute_planned_virtual_outdoor_temperatures(
         [True, False, False, True],

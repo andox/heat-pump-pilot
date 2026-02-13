@@ -207,22 +207,24 @@ def compute_continuous_virtual_outdoor(
     base_shift = offset * (1.0 - 2.0 * ratio)
     value = float(base_outdoor) + base_shift
 
-    warm_bias = compute_idle_warm_bias(
-        price=price,
-        price_baseline=price_baseline,
-        price_comfort_weight=price_comfort_weight,
-        price_penalty_curve=price_penalty_curve,
-        price_ratio_cap=price_ratio_cap,
-        predicted_temp=predicted_temp,
-        target_temperature=target_temperature,
-        comfort_temperature_tolerance=comfort_temperature_tolerance,
-        overshoot_warm_bias_enabled=overshoot_warm_bias_enabled,
-        overshoot_warm_bias_curve=overshoot_warm_bias_curve,
-        virtual_heat_offset=offset,
-    )
-    if warm_bias > 0.0:
-        warm_bias *= max(0.0, 1.0 - ratio)
-        value = min(value + warm_bias, float(base_outdoor) + offset)
+    # Backoff/warm-bias is only applied during pure idle. During any active
+    # preheating/heating duty (ratio > 0), avoid counteracting the heating intent.
+    if ratio <= 0.0:
+        warm_bias = compute_idle_warm_bias(
+            price=price,
+            price_baseline=price_baseline,
+            price_comfort_weight=price_comfort_weight,
+            price_penalty_curve=price_penalty_curve,
+            price_ratio_cap=price_ratio_cap,
+            predicted_temp=predicted_temp,
+            target_temperature=target_temperature,
+            comfort_temperature_tolerance=comfort_temperature_tolerance,
+            overshoot_warm_bias_enabled=overshoot_warm_bias_enabled,
+            overshoot_warm_bias_curve=overshoot_warm_bias_curve,
+            virtual_heat_offset=offset,
+        )
+        if warm_bias > 0.0:
+            value = min(value + warm_bias, float(base_outdoor) + offset)
 
     value = max(float(base_outdoor) - offset, value)
     return min(value, max_virtual_outdoor)

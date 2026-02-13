@@ -147,7 +147,8 @@ temperature is already lower.
 When **continuous control** is enabled, the controller smooths the virtual
 outdoor temperature based on the planned duty ratio over a short window. A
 ratio of 0 maps to `outdoor + virtual_heat_offset`, while 1 maps to
-`outdoor - virtual_heat_offset`, with price/overshoot warm-bias blended in.
+`outdoor - virtual_heat_offset`. Price/overshoot warm-bias is only applied at
+pure idle (`duty_ratio == 0`), not during active preheating/heating duty.
 When overshoot warm bias is enabled, the MPC comfort penalty becomes asymmetric:
 above-target errors are penalized more strongly once indoor temperature exceeds
 the comfort tolerance. The warm-bias back-off ramps from a minimum of `0` to a
