@@ -117,19 +117,19 @@ Performance metrics:
 These are starting points; adjust after 1–2 days of data.
 
 Comfort‑first:
-- Price vs comfort weight: 0.70
+- Price vs comfort weight: 0.30
 - Price penalty curve: sqrt
 - Comfort tolerance: 0.5–1.0°C
 - Virtual outdoor heat offset: 3–6°C
 
 Balanced:
-- Price vs comfort weight: 0.85
+- Price vs comfort weight: 0.50
 - Price penalty curve: linear
 - Comfort tolerance: 0.8–1.2°C
 - Virtual outdoor heat offset: 4–8°C
 
 Price‑first:
-- Price vs comfort weight: 0.95
+- Price vs comfort weight: 0.70
 - Price penalty curve: quadratic
 - Comfort tolerance: 1.0–1.5°C
 - Virtual outdoor heat offset: 6–10°C
