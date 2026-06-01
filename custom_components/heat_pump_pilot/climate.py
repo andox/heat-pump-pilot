@@ -158,6 +158,13 @@ PRICE_HISTORY_MAX_ENTRIES = 2880  # ~30d at 15-minute sampling.
 DECISION_SERIES_MAX_ENTRIES = 192  # Keep decision attributes under recorder size limits.
 THERMAL_PERSIST_INTERVAL = timedelta(minutes=15)
 
+# EKF/RLS coefficient learning is skipped when the elapsed interval exceeds this
+# threshold. A long gap (HA pause, sensor outage) makes the single-step Euler
+# prediction unreliable and the resulting innovation can corrupt the learned
+# loss/gain. Above the threshold we still observe the indoor temperature but
+# leave coefficients unchanged and resume learning on the next normal interval.
+MAX_LEARNING_DT_HOURS = 2.0
+
 NOTIFY_HEALTH_COOLDOWN = timedelta(hours=1)
 NOTIFY_SENSORS_COOLDOWN = timedelta(hours=1)
 NOTIFY_FALLBACK_TRIGGER_AFTER = timedelta(minutes=30)
@@ -967,6 +974,14 @@ class MpcHeatPumpClimate(ClimateEntity):
         if heat_on is None:
             # No trustworthy heat signal; keep parameters stable and only observe temperature.
             self._thermal_model.observe_temperature(indoor_temp)
+            return
+
+        if dt_hours > MAX_LEARNING_DT_HOURS:
+            # Interval too long for a reliable single-step Euler update; observe
+            # temperature only and resume coefficient learning next normal interval.
+            self._thermal_model.observe_temperature(indoor_temp)
+            if self._heating_detection_active():
+                self._reset_heating_duty_cycle(now)
             return
 
         self._thermal_model.step(indoor_temp, outdoor_for_model, heat_on, dt_hours)

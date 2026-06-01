@@ -204,6 +204,10 @@ def compute_continuous_virtual_outdoor(
         return min(float(base_outdoor), max_virtual_outdoor)
 
     ratio = max(0.0, min(1.0, float(duty_ratio)))
+    # Intentional: duty_ratio encodes planned heating intensity over the window,
+    # not the binary first-step decision. ratio=1 => full cold (max heat drive),
+    # ratio=0 => full warm (max back-off), ratio=0.5 => neutral. A low duty ratio
+    # correctly backs off the pump even when step 0 of the MPC sequence is heat=True.
     base_shift = offset * (1.0 - 2.0 * ratio)
     value = float(base_outdoor) + base_shift
 
