@@ -44,6 +44,19 @@ def test_align_forecast_at_interval_boundary() -> None:
     assert forecast == [1.0, 2.0]
 
 
+def test_align_forecast_infers_missing_end_from_next_start() -> None:
+    """Start-only hourly price entries should keep the current slot."""
+    tz = timezone(timedelta(hours=1))
+    raw = [
+        {"start": "2025-12-12T21:00:00+01:00", "value": 1.9},
+        {"start": "2025-12-12T22:00:00+01:00", "value": 0.63},
+        {"start": "2025-12-12T23:00:00+01:00", "value": 0.62},
+    ]
+    now = datetime(2025, 12, 12, 21, 41, tzinfo=tz)
+    forecast = align_forecast_to_now(extract_timed_values(raw), now)
+    assert forecast == [1.9, 0.63, 0.62]
+
+
 def test_align_forecast_before_first_entry() -> None:
     """If 'now' is before the first entry, first entry becomes current."""
     tz = timezone.utc

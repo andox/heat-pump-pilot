@@ -136,8 +136,13 @@ def align_forecast_to_now(values: Iterable[TimedValue], now: datetime) -> list[f
     current: float | None = None
     future: list[float] = []
 
-    for entry in timed:
-        if entry.end is not None and entry.start <= now < entry.end:
+    for index, entry in enumerate(timed):
+        next_start = timed[index + 1].start if index + 1 < len(timed) else None
+        effective_end = entry.end
+        if effective_end is None and next_start is not None and entry.start < next_start:
+            effective_end = next_start
+
+        if effective_end is not None and entry.start <= now < effective_end:
             current = entry.value
         if entry.start > now:
             future.append(entry.value)

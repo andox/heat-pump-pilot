@@ -43,6 +43,15 @@ def _pad_to_length(values: list[float], length: int, fallback: float) -> list[fl
     return values[:length]
 
 
+def resolve_virtual_heat_offset(default_offset: float, override_offset: float | None = None) -> float:
+    """Return the non-negative heat offset to use for a heat request."""
+    source = default_offset if override_offset is None else override_offset
+    try:
+        return max(0.0, float(source))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def compute_planned_virtual_outdoor_temperatures(
     sequence: Sequence[bool] | None,
     outdoor_forecast: Sequence[float] | None,

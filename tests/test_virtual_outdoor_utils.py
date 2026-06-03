@@ -14,6 +14,7 @@ from virtual_outdoor_utils import (  # noqa: E402
     compute_continuous_virtual_outdoor,
     compute_overshoot_warm_bias,
     compute_planned_virtual_outdoor_temperatures,
+    resolve_virtual_heat_offset,
 )
 
 
@@ -161,6 +162,16 @@ def test_continuous_virtual_outdoor_bounds() -> None:
     assert value_idle == 15.0
     assert value_mid == 10.0
     assert value_full == 5.0
+
+
+def test_summer_override_can_use_separate_virtual_heat_offset() -> None:
+    normal_offset = resolve_virtual_heat_offset(6.0)
+    summer_offset = resolve_virtual_heat_offset(6.0, 16.0)
+
+    assert normal_offset == 6.0
+    assert summer_offset == 16.0
+    assert 24.0 - normal_offset == 18.0
+    assert 24.0 - summer_offset == 8.0
 
 
 def test_planned_virtual_outdoor_continuous_mode() -> None:

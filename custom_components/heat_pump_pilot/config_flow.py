@@ -40,6 +40,12 @@ from .const import (
     CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     CONF_CONTINUOUS_CONTROL_ENABLED,
     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
+    CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+    CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+    CONF_SUMMER_HEAT_WINDOW_ENABLED,
+    CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+    CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
+    CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
     CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
     CONF_PRICE_PENALTY_CURVE,
     CONF_TARGET_TEMPERATURE,
@@ -68,6 +74,12 @@ from .const import (
     DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     DEFAULT_CONTINUOUS_CONTROL_ENABLED,
     DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
+    DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+    DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+    DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
+    DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+    DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
+    DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
     DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
     DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
     DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
@@ -131,6 +143,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
                 CONF_CONTINUOUS_CONTROL_ENABLED: DEFAULT_CONTINUOUS_CONTROL_ENABLED,
                 CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
+                CONF_SUMMER_HEAT_WINDOW_ENABLED: DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
+                CONF_SUMMER_HEAT_WINDOW_MAX_PRICE: DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
+                CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES: DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+                CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS: DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+                CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO: DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+                CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET: DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
                 CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED: DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
                 CONF_OVERSHOOT_WARM_BIAS_ENABLED: DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
                 CONF_OVERSHOOT_WARM_BIAS_CURVE: DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
@@ -291,6 +309,30 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 ),
                 CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: user_input.get(
                     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS, DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
+                ),
+                CONF_SUMMER_HEAT_WINDOW_ENABLED: user_input.get(
+                    CONF_SUMMER_HEAT_WINDOW_ENABLED, DEFAULT_SUMMER_HEAT_WINDOW_ENABLED
+                ),
+                CONF_SUMMER_HEAT_WINDOW_MAX_PRICE: user_input.get(
+                    CONF_SUMMER_HEAT_WINDOW_MAX_PRICE, DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE
+                ),
+                CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES: user_input.get(
+                    CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES, DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES
+                ),
+                CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS: user_input.get(
+                    CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+                    DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+                ),
+                CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO: user_input.get(
+                    CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+                    DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+                ),
+                CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET: user_input.get(
+                    CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+                    self._config_entry.options.get(
+                        CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+                        DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+                    ),
                 ),
                 CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED: user_input.get(
                     CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED
@@ -459,6 +501,80 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     selector.SelectSelectorConfig(
                         options=[str(value) for value in CONTINUOUS_CONTROL_WINDOW_OPTIONS],
                         mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_SUMMER_HEAT_WINDOW_ENABLED,
+                    default=options.get(CONF_SUMMER_HEAT_WINDOW_ENABLED, DEFAULT_SUMMER_HEAT_WINDOW_ENABLED),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
+                    default=options.get(CONF_SUMMER_HEAT_WINDOW_MAX_PRICE, DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=5,
+                        step=0.01,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+                    default=options.get(
+                        CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+                        DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=15,
+                        max=240,
+                        step=15,
+                        unit_of_measurement="min",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+                    default=options.get(
+                        CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+                        DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=6,
+                        max=96,
+                        step=6,
+                        unit_of_measurement="h",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+                    default=options.get(
+                        CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+                        DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=1,
+                        step=0.01,
+                        mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Required(
+                    CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+                    default=options.get(
+                        CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+                        options.get(CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET, DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET),
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=30,
+                        step=0.5,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
                 vol.Required(
