@@ -365,6 +365,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_RLS_FORGETTING_FACTOR: user_input.get(
                     CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR
                 ),
+                CONF_LEARNING_WINDOW_HOURS: user_input.get(CONF_LEARNING_WINDOW_HOURS, DEFAULT_LEARNING_WINDOW_HOURS),
                 CONF_PERFORMANCE_WINDOW_HOURS: user_input.get(
                     CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS
                 ),
@@ -405,6 +406,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             absolute_threshold_default = str(absolute_threshold_default)
         return vol.Schema(
             {
+                # Inputs and output.
                 vol.Required(
                     CONF_INDOOR_TEMP,
                     default=current_data.get(CONF_INDOOR_TEMP),
@@ -434,6 +436,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     default=current_data.get(CONF_CONTROLLED_ENTITY),
                 ): vol.Any(None, str),
                 vol.Required(
+                    CONF_MONITOR_ONLY,
+                    default=options.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
+                ): selector.BooleanSelector(),
+
+                # Comfort and planning.
+                vol.Required(
                     CONF_TARGET_TEMPERATURE,
                     default=options.get(CONF_TARGET_TEMPERATURE, DEFAULT_TARGET_TEMPERATURE),
                 ): selector.NumberSelector(
@@ -446,6 +454,46 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     )
                 ),
                 vol.Required(
+                    CONF_COMFORT_TEMPERATURE_TOLERANCE,
+                    default=options.get(
+                        CONF_COMFORT_TEMPERATURE_TOLERANCE, DEFAULT_COMFORT_TEMPERATURE_TOLERANCE
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.2,
+                        max=3.0,
+                        step=0.1,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_CONTROL_INTERVAL_MINUTES,
+                    default=options.get(CONF_CONTROL_INTERVAL_MINUTES, DEFAULT_CONTROL_INTERVAL_MINUTES),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=5,
+                        max=120,
+                        step=5,
+                        unit_of_measurement="min",
+                        mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Required(
+                    CONF_PREDICTION_HORIZON_HOURS,
+                    default=options.get(CONF_PREDICTION_HORIZON_HOURS, DEFAULT_PREDICTION_HORIZON_HOURS),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=4,
+                        max=48,
+                        step=1,
+                        unit_of_measurement="h",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+
+                # Price optimization.
+                vol.Required(
                     CONF_PRICE_COMFORT_WEIGHT,
                     default=options.get(CONF_PRICE_COMFORT_WEIGHT, DEFAULT_PRICE_COMFORT_WEIGHT),
                 ): selector.NumberSelector(
@@ -454,6 +502,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         max=1,
                         step=0.05,
                         mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Required(
+                    CONF_PRICE_PENALTY_CURVE,
+                    default=options.get(CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(PRICE_PENALTY_CURVES),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
                 vol.Required(
@@ -483,6 +540,34 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
+
+                # Virtual outdoor control.
+                vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
+                    default=options.get(
+                        CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET, DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0,
+                        max=15,
+                        step=0.5,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_MIN_TEMP,
+                    default=options.get(CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=-40,
+                        max=10,
+                        step=0.5,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
                 vol.Required(
                     CONF_CONTINUOUS_CONTROL_ENABLED,
                     default=options.get(
@@ -503,6 +588,64 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
+                vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                    default=options.get(
+                        CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                        DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                    ),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                    default=options.get(
+                        CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                        DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=1.0,
+                        step=0.05,
+                        mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_ENABLED,
+                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_CURVE,
+                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(OVERSHOOT_WARM_BIAS_CURVES),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                    default=options.get(
+                        CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                        DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                    ),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                    default=options.get(
+                        CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                        DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=2.0,
+                        step=0.05,
+                        unit_of_measurement="°C",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+
+                # Summer low-price heat window.
                 vol.Required(
                     CONF_SUMMER_HEAT_WINDOW_ENABLED,
                     default=options.get(CONF_SUMMER_HEAT_WINDOW_ENABLED, DEFAULT_SUMMER_HEAT_WINDOW_ENABLED),
@@ -577,210 +720,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
-                vol.Required(
-                    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
-                    default=options.get(
-                        CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
-                        DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
-                    ),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_CONTROL_INTERVAL_MINUTES,
-                    default=options.get(CONF_CONTROL_INTERVAL_MINUTES, DEFAULT_CONTROL_INTERVAL_MINUTES),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=5,
-                        max=120,
-                        step=5,
-                        unit_of_measurement="min",
-                        mode=selector.NumberSelectorMode.SLIDER,
-                    )
-                ),
-                vol.Required(
-                    CONF_PREDICTION_HORIZON_HOURS,
-                    default=options.get(CONF_PREDICTION_HORIZON_HOURS, DEFAULT_PREDICTION_HORIZON_HOURS),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=4,
-                        max=48,
-                        step=1,
-                        unit_of_measurement="h",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_COMFORT_TEMPERATURE_TOLERANCE,
-                    default=options.get(
-                        CONF_COMFORT_TEMPERATURE_TOLERANCE, DEFAULT_COMFORT_TEMPERATURE_TOLERANCE
-                    ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.2,
-                        max=3.0,
-                        step=0.1,
-                        unit_of_measurement="°C",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_PERFORMANCE_WINDOW_HOURS,
-                    default=str(options.get(CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS)),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[str(value) for value in PERFORMANCE_WINDOW_OPTIONS],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Required(
-                    CONF_LEARNING_WINDOW_HOURS,
-                    default=str(options.get(CONF_LEARNING_WINDOW_HOURS, DEFAULT_LEARNING_WINDOW_HOURS)),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[str(value) for value in LEARNING_WINDOW_OPTIONS],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Required(
-                    CONF_MONITOR_ONLY,
-                    default=options.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
-                    default=options.get(
-                        CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET, DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET
-                    ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0,
-                        max=15,
-                        step=0.5,
-                        unit_of_measurement="°C",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_VIRTUAL_OUTDOOR_MIN_TEMP,
-                    default=options.get(CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=-40,
-                        max=10,
-                        step=0.5,
-                        unit_of_measurement="°C",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_PRICE_PENALTY_CURVE,
-                    default=options.get(CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=list(PRICE_PENALTY_CURVES),
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Required(
-                    CONF_OVERSHOOT_WARM_BIAS_ENABLED,
-                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_OVERSHOOT_WARM_BIAS_CURVE,
-                    default=options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=list(OVERSHOOT_WARM_BIAS_CURVES),
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Required(
-                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-                    default=options.get(
-                        CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-                        DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-                    ),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-                    default=options.get(
-                        CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-                        DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-                    ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.0,
-                        max=2.0,
-                        step=0.05,
-                        unit_of_measurement="°C",
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-                    default=options.get(
-                        CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-                        DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-                    ),
-                ): selector.BooleanSelector(),
-                vol.Required(
-                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-                    default=options.get(
-                        CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-                        DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-                    ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.0,
-                        max=1.0,
-                        step=0.05,
-                        mode=selector.NumberSelectorMode.SLIDER,
-                    )
-                ),
-                vol.Required(
-                    CONF_HEAT_LOSS_COEFFICIENT,
-                    default=options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.005,
-                        max=0.1,
-                        step=0.005,
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Required(
-                    CONF_THERMAL_RESPONSE_SEED,
-                    default=options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.0,
-                        max=1.0,
-                        step=0.05,
-                        mode=selector.NumberSelectorMode.SLIDER,
-                    )
-                ),
-                vol.Required(
-                    CONF_LEARNING_MODEL,
-                    default=options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[LEARNING_MODEL_EKF, LEARNING_MODEL_RLS],
-                        mode=selector.SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Required(
-                    CONF_RLS_FORGETTING_FACTOR,
-                    default=options.get(CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0.90,
-                        max=1.00,
-                        step=0.01,
-                        mode=selector.NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    CONF_INITIAL_INDOOR_TEMP,
-                    default=options.get(CONF_INITIAL_INDOOR_TEMP),
-                ): vol.Any(None, vol.Coerce(float)),
+
+                # Heating detection.
                 vol.Optional(
                     CONF_HEATING_SUPPLY_TEMP_ENTITY,
                     default=options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY),
@@ -853,6 +794,72 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         mode=selector.NumberSelectorMode.BOX,
                     )
                 ),
+
+                # Learning and performance.
+                vol.Required(
+                    CONF_LEARNING_MODEL,
+                    default=options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[LEARNING_MODEL_EKF, LEARNING_MODEL_RLS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_RLS_FORGETTING_FACTOR,
+                    default=options.get(CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.90,
+                        max=1.00,
+                        step=0.01,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_LEARNING_WINDOW_HOURS,
+                    default=str(options.get(CONF_LEARNING_WINDOW_HOURS, DEFAULT_LEARNING_WINDOW_HOURS)),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[str(value) for value in LEARNING_WINDOW_OPTIONS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_PERFORMANCE_WINDOW_HOURS,
+                    default=str(options.get(CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS)),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[str(value) for value in PERFORMANCE_WINDOW_OPTIONS],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_HEAT_LOSS_COEFFICIENT,
+                    default=options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.005,
+                        max=0.1,
+                        step=0.005,
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_THERMAL_RESPONSE_SEED,
+                    default=options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0.0,
+                        max=1.0,
+                        step=0.05,
+                        mode=selector.NumberSelectorMode.SLIDER,
+                    )
+                ),
+                vol.Optional(
+                    CONF_INITIAL_INDOOR_TEMP,
+                    default=options.get(CONF_INITIAL_INDOOR_TEMP),
+                ): vol.Any(None, vol.Coerce(float)),
                 vol.Optional(
                     CONF_INITIAL_HEAT_LOSS_OVERRIDE,
                     default=options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE),
@@ -861,5 +868,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_INITIAL_HEAT_GAIN,
                     default=options.get(CONF_INITIAL_HEAT_GAIN),
                 ): vol.Any(None, vol.Coerce(float)),
+
+                # Diagnostics.
+                vol.Required(
+                    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+                    default=options.get(
+                        CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+                        DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED,
+                    ),
+                ): selector.BooleanSelector(),
             }
         )

@@ -68,7 +68,7 @@ recommended values when you’re unsure. Values are in the UI unless noted.
 
 Core control:
 - Target temperature (default: 21.0°C): your comfort setpoint; set to your normal desired indoor temp.
-- Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.4-0.6.
+- Price priority (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.4-0.6.
 - Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
 - Price baseline window (default: 24 h): how much recent observed history is used alongside forecasts when scaling prices (24/48/72 h).
 - Absolute low-price threshold (default: auto): cap classification at `normal` when the current price is below the threshold (`auto` = median of recent history, `off` disables the cap).
@@ -82,10 +82,10 @@ Core control:
   whole summer heat window.
 - Summer heat window duration (default: 60 min): required continuous duration;
   the run is never split across multiple low-price periods.
-- Summer heat window demand window/max ratio (default: 48 h / 10%): automatic
+- Summer heat demand history window/max recent demand ratio (default: 48 h / 10%): automatic
   season gate based on recent normal MPC heat-request ratio, without calendar
   dates.
-- Summer heat window virtual heat offset (default: same as normal virtual
+- Summer heat virtual outdoor offset (default: same as normal virtual
   outdoor heat offset): virtual outdoor reduction used only when the summer
   window overrides idle.
 - Control interval (default: 15 min): how often MPC runs; keep 15-30 min unless you have slow sensors.
@@ -94,7 +94,7 @@ Core control:
 - Monitor only (default: false): true to disable control actions.
 
 Virtual outdoor control:
-- Virtual outdoor swing range (default: 10.0°C): max shift colder when heating and warmer when backing off; start at 6–12°C.
+- Virtual outdoor heat offset (default: 10.0°C): max shift colder when heating and warmer when backing off; start at 6–12°C.
 - Virtual outdoor minimum (default: -15.0°C): never send a lower virtual outdoor temperature unless the actual outdoor temperature is already below this.
 - Overshoot warm bias enabled (default: true): warm bias when predicted above target; also boosts MPC comfort penalty when above target.
 - Overshoot warm bias curve (default: linear): shape of the back-off ramp; options are linear, quadratic, cubic, sqrt.
@@ -130,19 +130,19 @@ Performance metrics:
 These are starting points; adjust after 1–2 days of data.
 
 Comfort‑first:
-- Price vs comfort weight: 0.30
+- Price priority: 0.30
 - Price penalty curve: sqrt
 - Comfort tolerance: 0.5–1.0°C
 - Virtual outdoor heat offset: 3–6°C
 
 Balanced:
-- Price vs comfort weight: 0.50
+- Price priority: 0.50
 - Price penalty curve: linear
 - Comfort tolerance: 0.8–1.2°C
 - Virtual outdoor heat offset: 4–8°C
 
 Price‑first:
-- Price vs comfort weight: 0.70
+- Price priority: 0.70
 - Price penalty curve: quadratic
 - Comfort tolerance: 1.0–1.5°C
 - Virtual outdoor heat offset: 6–10°C
@@ -196,7 +196,7 @@ it will not schedule another run for the same local day.
 During the selected window, normal MPC still runs first. If the MPC already
 requests heat, the window is counted without adding another behaviour. If the
 MPC is idle, the summer window overrides idle by lowering the virtual outdoor
-temperature using the dedicated **Summer heat window virtual heat offset**,
+temperature using the dedicated **Summer heat virtual outdoor offset**,
 which requests more heat from the heat pump. This lets the summer heat pulse use
 a stronger trigger than normal MPC heating if the pump needs a colder virtual
 outdoor value to start floor heating. The result is still constrained by the
