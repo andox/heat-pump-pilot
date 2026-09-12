@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
+
+try:
+    from .json_storage import AtomicJsonStorage
+except ImportError:  # pragma: no cover - direct test imports
+    from json_storage import AtomicJsonStorage  # type: ignore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -421,50 +423,15 @@ class ThermalModelRlsEstimator:
         return covariance
 
 
-class ThermalModelStorage:
+class ThermalModelStorage(AtomicJsonStorage):
     """Simple JSON file persistence for the estimator."""
-
-    def __init__(self, path: str) -> None:
-        self._path = Path(path)
-
-    def load(self) -> dict[str, Any] | None:
-        """Load persisted state from disk."""
-        if not self._path.exists():
-            return None
-        try:
-            with self._path.open("r", encoding="utf-8") as file:
-                return json.load(file)
-        except (OSError, json.JSONDecodeError):
-            return None
 
     def save(self, payload: ThermalModelState | dict[str, Any]) -> None:
         """Persist state atomically."""
-        self._path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(payload, ThermalModelState):
             data = {"version": 1, "state": payload.state, "covariance": payload.covariance}
         elif isinstance(payload, dict):
             data = dict(payload)
         else:
             return
-        temp_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                dir=self._path.parent,
-                delete=False,
-            ) as file:
-                temp_path = Path(file.name)
-                json.dump(data, file, ensure_ascii=True)
-                file.flush()
-                os.fsync(file.fileno())
-            temp_path.replace(self._path)
-        except FileNotFoundError as exc:
-            LOGGER.warning("Thermal model temp file missing during save: %s", exc)
-            self._path.write_text(json.dumps(data, ensure_ascii=True), encoding="utf-8")
-        except OSError as exc:
-            LOGGER.warning("Thermal model save failed (%s). Falling back to direct write.", exc)
-            self._path.write_text(json.dumps(data, ensure_ascii=True), encoding="utf-8")
-        finally:
-            if temp_path and temp_path.exists():
-                temp_path.unlink(missing_ok=True)
+        super().save(data)
