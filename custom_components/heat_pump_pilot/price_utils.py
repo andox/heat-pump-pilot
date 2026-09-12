@@ -42,6 +42,7 @@ def compute_price_baseline(
     steps_per_hour = int(round(1 / time_step_hours)) if time_step_hours > 0 else 1
     steps_per_hour = max(1, steps_per_hour)
     max_history_samples = max(0, int(window_hours) * steps_per_hour)
+    max_forecast_samples = max_history_samples
 
     history_values = _coerce_float_iterable(history)
     if max_history_samples:
@@ -61,6 +62,10 @@ def compute_price_baseline(
                 len(forecast_values) * steps_per_hour,
                 time_step_hours,
             )
+        if max_forecast_samples:
+            forecast_expanded = forecast_expanded[:max_forecast_samples]
+        else:
+            forecast_expanded = []
     forecast_positive = [value for value in forecast_expanded if value > 0]
 
     baseline_pool = history_positive + forecast_positive

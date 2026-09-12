@@ -74,6 +74,19 @@ def test_price_baseline_does_not_expand_subhourly_forecast() -> None:
     assert details["forecast_samples"] == len(forecast)
 
 
+def test_price_baseline_trims_forecast_to_window() -> None:
+    forecast = [1.0] * 24 + [100.0] * 24
+    baseline, details = compute_price_baseline(
+        history=[],
+        forecast=forecast,
+        time_step_hours=0.25,
+        window_hours=24,
+        baseline_floor=PRICE_BASELINE_FLOOR,
+    )
+    assert baseline == pytest.approx(1.0)
+    assert details["forecast_samples"] == 96
+
+
 def test_price_classification_labels() -> None:
     assert price_label_from_ratio(0.7) == "very_low"
     assert price_label_from_ratio(0.85) == "low"
