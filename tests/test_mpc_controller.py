@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from itertools import product
+
+import pytest
+
 from const import PRICE_BASELINE_FLOOR
 from mpc_controller import MpcController
 
@@ -269,3 +273,81 @@ def test_overshoot_bias_increases_above_target_penalty() -> None:
 
     assert with_bias._comfort_penalty(19.0) == without_bias._comfort_penalty(19.0)
     assert with_bias._comfort_penalty(21.0) > without_bias._comfort_penalty(21.0)
+
+
+def _unrounded_cost(controller, indoor, outdoor, prices, sequence):
+    """Independently replay the linear-price objective with full precision."""
+    temp = indoor
+    total = 0.0
+    previous = None
+    for ambient, price, action in zip(outdoor, prices, sequence):
+        error = max(0.0, abs(temp - controller.target_temperature) - controller.comfort_temperature_tolerance)
+        total += (1.0 - controller.price_comfort_weight) * error * controller.time_step_hours
+        total += controller.price_comfort_weight * price * action * controller.time_step_hours
+        if previous is not None and previous != action:
+            total += 0.05
+        temp += controller.time_step_hours * (
+            controller.heat_loss_coeff * (ambient - temp) + controller.heat_gain_coeff * action
+        )
+        previous = action
+    return total
+
+
+def test_sub_bucket_cooling_accumulates_and_changes_plan() -> None:
+    controller = MpcController(
+        target_temperature=20.0, price_comfort_weight=0.5,
+        comfort_temperature_tolerance=0.2, prediction_horizon_hours=24,
+        heat_loss_coeff=0.001, heat_gain_coeff=0.4,
+    )
+    outdoor, prices = [-10.0] * 96, [1.0] * 96
+    _, result = controller.suggest_control(20.0, outdoor, prices, price_baseline_override=1.0)
+    coast_cost = _unrounded_cost(controller, 20.0, outdoor, prices, [False] * 96)
+    assert any(result.sequence)
+    assert 0.0 < result.cost < coast_cost
+    assert result.cost == pytest.approx(_unrounded_cost(controller, 20.0, outdoor, prices, result.sequence))
+
+
+@pytest.mark.parametrize('ambient', [-10.0, 50.0])
+def test_sub_bucket_passive_drift_cost_matches_actual_forecast(ambient) -> None:
+    controller = MpcController(
+        target_temperature=20.0, price_comfort_weight=0.5,
+        comfort_temperature_tolerance=0.2, prediction_horizon_hours=24,
+        heat_loss_coeff=0.001, heat_gain_coeff=0.0,
+    )
+    outdoor, prices = [ambient] * 96, [1.0] * 96
+    _, result = controller.suggest_control(20.007, outdoor, prices, price_baseline_override=1.0)
+    assert not any(result.sequence)
+    assert abs(result.predicted_temperatures[-1] - 20.007) > 0.7
+    assert result.cost > 0.0
+    assert result.cost == pytest.approx(_unrounded_cost(controller, 20.007, outdoor, prices, result.sequence))
+
+
+def test_sub_bucket_heating_accumulates() -> None:
+    controller = MpcController(
+        target_temperature=20.0, price_comfort_weight=0.0,
+        comfort_temperature_tolerance=0.0, prediction_horizon_hours=4,
+        heat_loss_coeff=0.0, heat_gain_coeff=0.02,
+    )
+    outdoor, prices = [19.0] * 16, [1.0] * 16
+    _, result = controller.suggest_control(19.0, outdoor, prices, price_baseline_override=1.0)
+    assert all(result.sequence)
+    assert result.predicted_temperatures[-1] == pytest.approx(19.08)
+    assert result.cost < 4.0
+    assert result.cost == pytest.approx(_unrounded_cost(controller, 19.0, outdoor, prices, result.sequence))
+
+
+@pytest.mark.parametrize('loss,gain', [(0.001, 0.4), (0.02, 0.8), (0.0, 0.02)])
+def test_short_horizon_matches_exhaustive_unrounded_search(loss, gain) -> None:
+    controller = MpcController(
+        target_temperature=20.0, price_comfort_weight=0.1,
+        comfort_temperature_tolerance=0.05, prediction_horizon_hours=2,
+        heat_loss_coeff=loss, heat_gain_coeff=gain,
+    )
+    outdoor = [-10.0, -9.0, -8.0, -10.0, -11.0, -10.0, -9.0, -10.0]
+    prices = [0.5, 0.5, 1.0, 2.0, 2.0, 1.0, 0.5, 0.5]
+    _, result = controller.suggest_control(19.807, outdoor, prices, price_baseline_override=1.0)
+    optimal_cost = min(
+        _unrounded_cost(controller, 19.807, outdoor, prices, sequence)
+        for sequence in product((False, True), repeat=8)
+    )
+    assert result.cost == pytest.approx(optimal_cost)

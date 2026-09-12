@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 import logging
 import math
 from statistics import median
@@ -37,13 +36,11 @@ HEAT_LOSS_COEFF = 0.05
 HEAT_GAIN_COEFF = 0.6
 # Use 15-minute steps to enable finer preheat/coast behaviour.
 TIME_STEP_HOURS = 0.25
-# Temperature quantization for the DP cache.
-# NOTE: This must be small enough to capture typical per-step heat loss at a 15 min
-# cadence; otherwise quantization can cause the optimizer to think the temperature
-# is "stuck" (too coarse) or drift unrealistically (biased quantization).
+# Temperature buckets limit the number of candidate plans retained at each step.
+# Actual simulated temperatures are never rounded to these buckets.
 TEMP_RESOLUTION = 0.02
-# Small penalty for actuator toggling.
-TOGGLE_PENALTY = 0.01
+# Discourage 15-minute binary chatter; continuous mode still refines the final request.
+TOGGLE_PENALTY = 0.05
 
 
 @dataclass
@@ -54,6 +51,16 @@ class ControlResult:
     predicted_temperatures: list[float]
     cost: float
     price_baseline: float
+
+
+@dataclass(slots=True)
+class _PlanNode:
+    """One candidate with its exact temperature and a link to its preceding step."""
+
+    temperature: float
+    cost: float
+    action: bool | None
+    previous: _PlanNode | None
 
 
 class MpcController:
@@ -180,16 +187,12 @@ class MpcController:
         return indoor_temp + delta + heating_effect
 
     def _quantize_temp(self, temp: float) -> int:
-        """Quantize temperature to an integer bucket for DP caching."""
+        """Group nearby candidate temperatures without changing their state."""
         scaled = temp / self._temp_resolution
         # Round to nearest bucket (symmetric for negative values).
         if scaled >= 0:
             return int(math.floor(scaled + 0.5))
         return int(math.ceil(scaled - 0.5))
-
-    def _dequantize_temp(self, bucket: int) -> float:
-        """Convert a quantized temp bucket back to float."""
-        return bucket * self._temp_resolution
 
     def _apply_price_penalty_curve(self, ratio: float) -> float:
         """Apply the configured price curve above the baseline ratio."""
@@ -213,47 +216,57 @@ class MpcController:
         price_baseline: float,
         max_price: float,
     ) -> tuple[list[bool], float]:
-        """Dynamic programming solver for the optimal on/off sequence."""
-        steps = len(outdoor)
-        start_bucket = self._quantize_temp(indoor_temp)
+        """Search forward, retaining the cheapest candidate per bucket/action.
 
-        @lru_cache(maxsize=None)
-        def solve(idx: int, temp_bucket: int, prev_action: int) -> tuple[float, tuple[bool, ...]]:
-            if idx >= steps:
-                return 0.0, ()
+        Buckets only prune similar plans; every surviving plan carries its exact
+        simulated temperature. Feeding bucket centers back into the model would
+        repeatedly erase small heat loss/gain increments. The search remains an
+        approximation because nearby candidates are merged, but the returned
+        cost and temperature trajectory describe the same unrounded plan.
+        """
+        initial = _PlanNode(indoor_temp, 0.0, None, None)
+        candidates: dict[tuple[int, bool | None], _PlanNode] = {
+            (self._quantize_temp(indoor_temp), None): initial
+        }
+        baseline_denom = max(price_baseline, PRICE_BASELINE_FLOOR)
 
-            temp = self._dequantize_temp(temp_bucket)
-            best_cost = float("inf")
-            best_path: tuple[bool, ...] = ()
+        for idx, outdoor_temp in enumerate(outdoor):
+            next_candidates: dict[tuple[int, bool | None], _PlanNode] = {}
             current_price = prices[idx] if prices else 0.0
+            price_ratio = max(PRICE_RATIO_MIN, current_price / baseline_denom)
+            heating_cost = (
+                self.price_comfort_weight
+                * self._apply_price_penalty_curve(price_ratio)
+                * self.time_step_hours
+            )
+            for node in candidates.values():
+                comfort_cost = (
+                    (1.0 - self.price_comfort_weight)
+                    * self._comfort_penalty(node.temperature)
+                    * self.time_step_hours
+                )
+                for action in (False, True):
+                    toggle_cost = (
+                        TOGGLE_PENALTY
+                        if node.action is not None and node.action != action
+                        else 0.0
+                    )
+                    cost = node.cost + comfort_cost + (heating_cost if action else 0.0) + toggle_cost
+                    next_temp = self._predict_temp(node.temperature, outdoor_temp, float(action))
+                    key = (self._quantize_temp(next_temp), action)
+                    incumbent = next_candidates.get(key)
+                    if incumbent is None or cost < incumbent.cost:
+                        next_candidates[key] = _PlanNode(next_temp, cost, action, node)
+            candidates = next_candidates
 
-            for action in (False, True):
-                heat_power = 1.0 if action else 0.0
-                comfort_penalty = self._comfort_penalty(temp)
-                # Penalize heating relative to the (median) baseline price.
-                # Using max_price here would squash the relative differences we care about.
-                baseline_denom = max(price_baseline, PRICE_BASELINE_FLOOR)
-                price_ratio = current_price / baseline_denom
-                price_ratio = max(PRICE_RATIO_MIN, price_ratio)
-                price_penalty = self._apply_price_penalty_curve(price_ratio)
-                price_cost = self.price_comfort_weight * price_penalty * heat_power * self.time_step_hours
-                comfort_cost = (1.0 - self.price_comfort_weight) * comfort_penalty * self.time_step_hours
-                toggle_cost = TOGGLE_PENALTY if prev_action != -1 and bool(prev_action) != action else 0.0
-
-                step_cost = price_cost + comfort_cost + toggle_cost
-                next_temp = self._predict_temp(temp, outdoor[idx], heat_power)
-                next_bucket = self._quantize_temp(next_temp)
-                future_cost, future_path = solve(idx + 1, next_bucket, int(action))
-                total_cost = step_cost + future_cost
-
-                if total_cost < best_cost:
-                    best_cost = total_cost
-                    best_path = (action,) + future_path
-
-            return best_cost, best_path
-
-        cost, path = solve(0, start_bucket, -1)
-        return list(path), cost
+        best = min(candidates.values(), key=lambda node: node.cost)
+        cost = best.cost
+        path: list[bool] = []
+        while best.previous is not None:
+            path.append(bool(best.action))
+            best = best.previous
+        path.reverse()
+        return path, cost
 
     def _comfort_penalty(self, temp: float) -> float:
         """Compute comfort penalty with optional above-target bias."""
