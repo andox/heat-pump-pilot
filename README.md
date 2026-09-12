@@ -274,11 +274,17 @@ Key diagnostic sensors:
   `overshoot_warm_bias_enabled`, `overshoot_warm_bias_curve`,
   `overshoot_warm_bias_min_bias`, `overshoot_warm_bias_max_bias`,
   `overshoot_warm_bias_applied`, and `overshoot_warm_bias_multiplier`.
+  In continuous mode, `suggested_heat_on` is the raw first binary MPC step for
+  compatibility; use `effective_requested_duty_ratio`,
+  `effective_heat_request_state`, `anti_chatter_limited`, and
+  `raw_mpc_sequence_head` to understand the actual applied request.
   Large arrays (price history/forecast, outdoor forecast, planned temps) are capped
   to the most recent 192 entries to stay under recorder limits.
 - Heat Pump Pilot Health: overall health with reasons (missing sensors, stale control, etc).
 - Curve recommendation (Health attribute): suggests when to raise/lower the heat pump curve
-  based on heating detected during idle vs requested heating over the performance window.
+  based on heating detected during low requested heat vs active requested heat over the
+  performance window. In continuous mode this uses requested duty ratio (not only on/off),
+  so small non-zero preheating is not treated as true idle.
 - Heat Pump Pilot Control State: whether the integration is controlling or monitoring.
 - Heat Pump Pilot Learning State: learning vs stable, with change ratios and window stats.
 - Heat Pump Pilot Price State: current price classification and baseline details.
@@ -485,8 +491,11 @@ cards:
         name: Back-off max (°C)
 ```
 
-## ApexCharts overview (example)
+## ApexCharts overview (continuous-control example)
 This ApexCharts card shows indoor/virtual/outdoor temperatures alongside Nordpool prices.
+It is tuned for the current integration behavior where `suggested_heat_on` is the raw
+first MPC step, while `effective_requested_duty_ratio` is the actual effective request
+used to drive virtual outdoor control in continuous mode.
 Replace entity IDs with your own sensors/entities (indoor temp, outdoor temp, Nordpool, etc.).
 
 ```yaml
@@ -555,7 +564,10 @@ yaxis:
     show: false
     min: -0.05
     max: 1.05
-    decimals: 0
+    decimals: 2
+    apex_config:
+      title:
+        text: Request / Heat
 series:
   - name: Heat detected
     entity: binary_sensor.heat_pump_pilot_heating_detected
@@ -564,25 +576,55 @@ series:
     color: "#94A3B8"
     stroke_width: 1
     curve: stepline
-    opacity: 0.012
+    opacity: 0.14
     group_by:
       duration: 5min
       func: max
-    transform: "return (x === 'on' || x === true) ? 0.2 : 0;"
+    transform: "return (x === 'on' || x === true) ? 1 : 0;"
     show:
       legend_value: false
-  - name: Heat request
+  - name: Requested duty ratio
     entity: sensor.heat_pump_pilot_decision
+    attribute: effective_requested_duty_ratio
     type: area
     yaxis_id: binary
     color: "#EF4444"
     stroke_width: 1
     curve: stepline
-    opacity: 0.35
+    opacity: 0.28
     group_by:
       duration: 5min
       func: max
-    transform: "return (x === 'heat_on') ? 0.2 : 0;"
+    transform: "return Number.isFinite(Number(x)) ? Number(x) : null;"
+    show:
+      legend_value: false
+  - name: Raw MPC first step
+    entity: sensor.heat_pump_pilot_decision
+    type: line
+    yaxis_id: binary
+    color: "#F87171"
+    stroke_width: 1
+    curve: stepline
+    stroke_dash: 4
+    group_by:
+      duration: 5min
+      func: max
+    transform: "return (x === 'heat_on') ? 1 : 0;"
+    show:
+      legend_value: false
+  - name: Anti-chatter limited
+    entity: sensor.heat_pump_pilot_decision
+    attribute: anti_chatter_limited
+    type: line
+    yaxis_id: binary
+    color: "#FB7185"
+    stroke_width: 1
+    stroke_dash: 2
+    curve: stepline
+    group_by:
+      duration: 5min
+      func: max
+    transform: "return (x === true || x === 'true') ? 0.08 : 0;"
     show:
       legend_value: false
   - name: Indoor (sensor)
@@ -753,6 +795,14 @@ series:
       (!Number.isFinite(b)) return []; const now = Date.now(); return [[now - 24
       * 60 * 60 * 1000, b], [now + 24 * 60 * 60 * 1000, b]];
 ```
+
+Recommended interpretation:
+- `Requested duty ratio` is the effective continuous control request. This is the main
+  series to trust when you want to understand what Heat Pump Pilot actually asked for.
+- `Raw MPC first step` is only a diagnostic overlay. In continuous mode it can flip
+  even when the effective request stays stable.
+- `Anti-chatter limited` briefly rises when the controller suppresses a rapid reversal.
+- If you want a simpler chart, remove `Raw MPC first step` and `Anti-chatter limited`.
 
 ## Screenshots
 <table>

@@ -111,3 +111,43 @@ def test_curve_recommendation_insufficient_data() -> None:
     assert recommendation == "insufficient_data"
     assert details["idle_samples"] == 1
     assert details["active_samples"] == 1
+
+
+def test_curve_recommendation_uses_requested_duty_ratio_in_continuous_mode() -> None:
+    now = datetime(2025, 12, 20, 12, 0, tzinfo=timezone.utc)
+    samples = [
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False, requested_duty_ratio=0.25),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False, requested_duty_ratio=0.25),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False, requested_duty_ratio=0.25),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False, requested_duty_ratio=0.25),
+    ]
+    recommendation, details = compute_curve_recommendation(
+        samples,
+        min_samples=4,
+        idle_ratio_threshold=0.3,
+        active_ratio_threshold=0.2,
+        idle_request_threshold=0.1,
+    )
+    assert recommendation == "ok"
+    assert details["idle_samples"] == 0
+    assert details["active_samples"] == 4
+
+
+def test_curve_recommendation_treats_low_duty_ratio_as_idle() -> None:
+    now = datetime(2025, 12, 20, 12, 0, tzinfo=timezone.utc)
+    samples = [
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False, requested_duty_ratio=0.05),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False, requested_duty_ratio=0.05),
+        PerformanceSample(now, 20.0, 20.0, True, 0.2, None, suggested_heat_on=False, requested_duty_ratio=0.05),
+        PerformanceSample(now, 20.0, 20.0, False, 0.2, None, suggested_heat_on=False, requested_duty_ratio=0.05),
+    ]
+    recommendation, details = compute_curve_recommendation(
+        samples,
+        min_samples=4,
+        idle_ratio_threshold=0.5,
+        active_ratio_threshold=0.2,
+        idle_request_threshold=0.1,
+    )
+    assert recommendation == "lower_curve"
+    assert details["idle_samples"] == 4
+    assert details["idle_heating_ratio"] == pytest.approx(0.75)

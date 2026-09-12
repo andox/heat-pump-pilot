@@ -55,6 +55,22 @@ def should_reseed_thermal_model(previous: dict[str, Any], current: dict[str, Any
     return False
 
 
+def resolve_estimator_initial_temp(options: dict[str, Any], current_indoor_temp: Any) -> float | None:
+    """Return the indoor temperature to use when rebuilding or reseeding the estimator.
+
+    Prefer an explicit configured initial indoor temperature. Otherwise, carry forward the
+    current measured temperature so estimator resets do not jump back to a hardcoded default.
+    """
+
+    configured = _normalized(options.get(CONF_INITIAL_INDOOR_TEMP))
+    if isinstance(configured, float):
+        return configured
+    current = _normalized(current_indoor_temp)
+    if isinstance(current, float):
+        return current
+    return None
+
+
 def _normalized(value: Any) -> Any:
     if value is None:
         return None

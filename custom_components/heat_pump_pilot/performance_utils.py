@@ -19,6 +19,7 @@ class PerformanceSample:
     price: float | None
     prediction_error: float | None
     suggested_heat_on: bool | None = None
+    requested_duty_ratio: float | None = None
 
 
 def compute_comfort_score(samples: Iterable[PerformanceSample], tolerance: float) -> tuple[float | None, dict[str, Any]]:
@@ -122,17 +123,35 @@ def compute_curve_recommendation(
     min_samples: int,
     idle_ratio_threshold: float,
     active_ratio_threshold: float,
+    idle_request_threshold: float = 0.1,
 ) -> tuple[str, dict[str, Any]]:
-    """Recommend curve adjustments based on heating detected vs MPC intent."""
+    """Recommend curve adjustments based on heating detected vs effective heat request.
+
+    In continuous-control mode, a boolean `suggested_heat_on=False` does not
+    necessarily mean "idle" if the requested duty ratio is still above zero.
+    This function therefore prefers `requested_duty_ratio` when available and
+    falls back to legacy boolean intent for older samples.
+    """
     idle_samples = 0
     idle_heating = 0
     active_samples = 0
     active_heating = 0
+    request_threshold = max(0.0, min(1.0, float(idle_request_threshold)))
 
     for sample in samples:
-        if sample.suggested_heat_on is None or sample.heating_detected is None:
+        if sample.heating_detected is None:
             continue
-        if sample.suggested_heat_on:
+        requested = sample.requested_duty_ratio
+        if requested is None:
+            if sample.suggested_heat_on is None:
+                continue
+            requested = 1.0 if sample.suggested_heat_on else 0.0
+        try:
+            requested = max(0.0, min(1.0, float(requested)))
+        except (TypeError, ValueError):
+            continue
+
+        if requested > request_threshold:
             active_samples += 1
             if sample.heating_detected:
                 active_heating += 1
@@ -168,5 +187,6 @@ def compute_curve_recommendation(
         "min_samples": min_samples,
         "idle_ratio_threshold": idle_ratio_threshold,
         "active_ratio_threshold": active_ratio_threshold,
+        "idle_request_threshold": request_threshold,
     }
     return recommendation, details

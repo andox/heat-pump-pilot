@@ -117,7 +117,12 @@ class _MpcHeatPumpPerformanceSensor(SensorEntity):
 
 
 class MpcHeatPumpDecisionSensor(_MpcHeatPumpBaseSensor):
-    """Expose the latest MPC decision as a diagnostic sensor."""
+    """Expose the latest MPC decision as a diagnostic sensor.
+
+    In continuous-control mode, `suggested_heat_on` remains the raw first binary MPC
+    step for compatibility. Use the decision attributes to inspect the effective
+    requested duty ratio and anti-chatter-limited request state.
+    """
 
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_icon = "mdi:brain"
@@ -130,7 +135,7 @@ class MpcHeatPumpDecisionSensor(_MpcHeatPumpBaseSensor):
 
     @property
     def native_value(self) -> str | None:
-        """Return the suggested action as sensor state."""
+        """Return the raw first-step MPC action as sensor state."""
         if not self._decision:
             return None
         return "heat_on" if self._decision.get("suggested_heat_on") else "idle"

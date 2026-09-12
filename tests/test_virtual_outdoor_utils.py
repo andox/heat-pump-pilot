@@ -12,8 +12,10 @@ if str(COMPONENT_ROOT) not in sys.path:
 
 from virtual_outdoor_utils import (  # noqa: E402
     compute_continuous_virtual_outdoor,
+    compute_duty_ratio,
     compute_overshoot_warm_bias,
     compute_planned_virtual_outdoor_temperatures,
+    compute_virtual_outdoor_from_mpc_step,
 )
 
 
@@ -199,3 +201,74 @@ def test_planned_virtual_outdoor_continuous_mode() -> None:
     assert planned is not None
     assert planned[0] == 0.0
     assert planned[1] == 4.0
+
+
+def test_virtual_outdoor_step_matches_planned_first_step_in_continuous_mode() -> None:
+    sequence = [True, False, False, True]
+    planned = compute_planned_virtual_outdoor_temperatures(
+        sequence,
+        outdoor_forecast=[2.0, 2.0, 2.0, 2.0],
+        price_forecast=[1.5, 1.5, 1.5, 1.5],
+        predicted_temperatures=[20.2, 20.1, 20.0, 19.9],
+        base_outdoor_fallback=2.0,
+        virtual_heat_offset=4.0,
+        price_comfort_weight=0.6,
+        price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
+        target_temperature=20.0,
+        overshoot_warm_bias_enabled=True,
+        overshoot_warm_bias_curve="linear",
+        continuous_control_enabled=True,
+        continuous_control_window_steps=2,
+    )
+    assert planned is not None
+
+    current = compute_virtual_outdoor_from_mpc_step(
+        base_outdoor=2.0,
+        heat_on=sequence[0],
+        virtual_heat_offset=4.0,
+        price=1.5,
+        price_baseline=1.0,
+        price_comfort_weight=0.6,
+        predicted_temp=20.2,
+        target_temperature=20.0,
+        comfort_temperature_tolerance=0.5,
+        overshoot_warm_bias_enabled=True,
+        overshoot_warm_bias_curve="linear",
+        duty_ratio=compute_duty_ratio(sequence, 0, 2),
+    )
+    assert current == planned[0]
+
+
+def test_virtual_outdoor_step_matches_planned_first_step_in_binary_mode() -> None:
+    sequence = [False, False]
+    planned = compute_planned_virtual_outdoor_temperatures(
+        sequence,
+        outdoor_forecast=[6.0, 6.0],
+        price_forecast=[3.0, 3.0],
+        predicted_temperatures=[21.0, 20.8],
+        base_outdoor_fallback=6.0,
+        virtual_heat_offset=5.0,
+        price_comfort_weight=0.8,
+        price_baseline=1.0,
+        comfort_temperature_tolerance=0.5,
+        target_temperature=20.0,
+        overshoot_warm_bias_enabled=True,
+        overshoot_warm_bias_curve="linear",
+    )
+    assert planned is not None
+
+    current = compute_virtual_outdoor_from_mpc_step(
+        base_outdoor=6.0,
+        heat_on=sequence[0],
+        virtual_heat_offset=5.0,
+        price=3.0,
+        price_baseline=1.0,
+        price_comfort_weight=0.8,
+        predicted_temp=21.0,
+        target_temperature=20.0,
+        comfort_temperature_tolerance=0.5,
+        overshoot_warm_bias_enabled=True,
+        overshoot_warm_bias_curve="linear",
+    )
+    assert current == planned[0]

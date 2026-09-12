@@ -13,6 +13,7 @@ from .const import (
     CONF_COMFORT_TEMPERATURE_TOLERANCE,
     CONF_CONTROL_INTERVAL_MINUTES,
     CONF_CONTROLLED_ENTITY,
+    CONF_HVAC_MODE,
     CONF_HEATING_DETECTION_ENABLED,
     CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
     CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN,
@@ -81,6 +82,7 @@ from .const import (
     DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS,
     DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
     DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD,
+    DEFAULT_HVAC_MODE,
     DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED,
     DEFAULT_OVERSHOOT_WARM_BIAS_CURVE,
     DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
@@ -96,6 +98,7 @@ from .const import (
     PERFORMANCE_WINDOW_OPTIONS,
     LEARNING_WINDOW_OPTIONS,
 )
+from .config_helpers import build_unique_id, find_conflicting_entry_id, normalize_hvac_mode
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -110,7 +113,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             controlled_entity = controlled_entity_raw.strip() if isinstance(controlled_entity_raw, str) else None
             if not controlled_entity:
                 controlled_entity = None
-            unique_id = controlled_entity or f"{user_input[CONF_INDOOR_TEMP]}_{user_input[CONF_OUTDOOR_TEMP]}"
+            unique_id = build_unique_id(
+                controlled_entity=controlled_entity,
+                indoor_temp_entity=user_input[CONF_INDOOR_TEMP],
+                outdoor_temp_entity=user_input[CONF_OUTDOOR_TEMP],
+            )
 
             # Allow multiple instances; key off the controlled entity when present, otherwise sensors.
             await self.async_set_unique_id(unique_id)
@@ -123,6 +130,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PREDICTION_HORIZON_HOURS: DEFAULT_PREDICTION_HORIZON_HOURS,
                 CONF_COMFORT_TEMPERATURE_TOLERANCE: DEFAULT_COMFORT_TEMPERATURE_TOLERANCE,
                 CONF_MONITOR_ONLY: user_input.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
+                CONF_HVAC_MODE: DEFAULT_HVAC_MODE,
                 CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET,
                 CONF_VIRTUAL_OUTDOOR_MIN_TEMP: DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP,
                 CONF_PRICE_PENALTY_CURVE: DEFAULT_PRICE_PENALTY_CURVE,
@@ -246,111 +254,130 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> config_entries.FlowResult:
         """Manage the options."""
         current_data = self._config_entry.data
+        errors: dict[str, str] = {}
         if user_input is not None:
             controlled_entity_raw = user_input.get(CONF_CONTROLLED_ENTITY)
             controlled_entity = controlled_entity_raw.strip() if isinstance(controlled_entity_raw, str) else None
             if not controlled_entity:
                 controlled_entity = None
-
-            new_data = {
-                CONF_INDOOR_TEMP: user_input[CONF_INDOOR_TEMP],
-                CONF_OUTDOOR_TEMP: user_input[CONF_OUTDOOR_TEMP],
-                CONF_PRICE_ENTITY: user_input[CONF_PRICE_ENTITY],
-                CONF_WEATHER_FORECAST_ENTITY: user_input[CONF_WEATHER_FORECAST_ENTITY],
-                CONF_CONTROLLED_ENTITY: controlled_entity,
-            }
-            heating_supply_entity = user_input.get(CONF_HEATING_SUPPLY_TEMP_ENTITY)
-            heating_detection_enabled = bool(heating_supply_entity) and bool(
-                user_input.get(CONF_HEATING_DETECTION_ENABLED, DEFAULT_HEATING_DETECTION_ENABLED)
+            unique_id = build_unique_id(
+                controlled_entity=controlled_entity,
+                indoor_temp_entity=user_input[CONF_INDOOR_TEMP],
+                outdoor_temp_entity=user_input[CONF_OUTDOOR_TEMP],
             )
-            new_options = {
-                CONF_TARGET_TEMPERATURE: user_input[CONF_TARGET_TEMPERATURE],
-                CONF_PRICE_COMFORT_WEIGHT: user_input[CONF_PRICE_COMFORT_WEIGHT],
-                CONF_CONTROL_INTERVAL_MINUTES: user_input[CONF_CONTROL_INTERVAL_MINUTES],
-                CONF_PREDICTION_HORIZON_HOURS: user_input[CONF_PREDICTION_HORIZON_HOURS],
-                CONF_COMFORT_TEMPERATURE_TOLERANCE: user_input[CONF_COMFORT_TEMPERATURE_TOLERANCE],
-                CONF_MONITOR_ONLY: user_input[CONF_MONITOR_ONLY],
-                CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: user_input[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET],
-                CONF_VIRTUAL_OUTDOOR_MIN_TEMP: user_input.get(
-                    CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP
-                ),
-                CONF_PRICE_PENALTY_CURVE: user_input.get(
-                    CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE
-                ),
-                CONF_PRICE_BASELINE_WINDOW_HOURS: user_input.get(
-                    CONF_PRICE_BASELINE_WINDOW_HOURS, DEFAULT_PRICE_BASELINE_WINDOW_HOURS
-                ),
-                CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: user_input.get(
-                    CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
-                ),
-                CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: user_input.get(
-                    CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS, DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS
-                ),
-                CONF_CONTINUOUS_CONTROL_ENABLED: user_input.get(
-                    CONF_CONTINUOUS_CONTROL_ENABLED, DEFAULT_CONTINUOUS_CONTROL_ENABLED
-                ),
-                CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: user_input.get(
-                    CONF_CONTINUOUS_CONTROL_WINDOW_HOURS, DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
-                ),
-                CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED: user_input.get(
-                    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED
-                ),
-                CONF_OVERSHOOT_WARM_BIAS_ENABLED: user_input.get(
-                    CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED
-                ),
-                CONF_OVERSHOOT_WARM_BIAS_CURVE: user_input.get(
-                    CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE
-                ),
-                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED: user_input.get(
-                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-                    DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-                ),
-                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS: user_input.get(
-                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-                    DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-                ),
-                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED: user_input.get(
-                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-                    DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-                ),
-                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA: user_input.get(
-                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-                    DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-                ),
-                CONF_HEAT_LOSS_COEFFICIENT: user_input[CONF_HEAT_LOSS_COEFFICIENT],
-                CONF_THERMAL_RESPONSE_SEED: user_input[CONF_THERMAL_RESPONSE_SEED],
-                CONF_LEARNING_MODEL: user_input.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
-                CONF_RLS_FORGETTING_FACTOR: user_input.get(
-                    CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR
-                ),
-                CONF_PERFORMANCE_WINDOW_HOURS: user_input.get(
-                    CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS
-                ),
-                CONF_HEATING_SUPPLY_TEMP_ENTITY: heating_supply_entity,
-                CONF_HEATING_SUPPLY_TEMP_THRESHOLD: user_input.get(
-                    CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD
-                ),
-                CONF_HEATING_DETECTION_ENABLED: heating_detection_enabled,
-                CONF_HEATING_SUPPLY_TEMP_HYSTERESIS: user_input.get(
-                    CONF_HEATING_SUPPLY_TEMP_HYSTERESIS, DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS
-                ),
-                CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS: user_input.get(
-                    CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS, DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS
-                ),
-                CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN: user_input.get(
-                    CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN
-                ),
-                CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN: user_input.get(
-                    CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN
-                ),
-                CONF_INITIAL_INDOOR_TEMP: user_input.get(CONF_INITIAL_INDOOR_TEMP),
-                CONF_INITIAL_HEAT_GAIN: user_input.get(CONF_INITIAL_HEAT_GAIN),
-                CONF_INITIAL_HEAT_LOSS_OVERRIDE: user_input.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE),
-            }
-            self.hass.config_entries.async_update_entry(self._config_entry, data=new_data)
-            return self.async_create_entry(title="", data=new_options)
-
-        return self.async_show_form(step_id="init", data_schema=self._build_options_schema())
+            conflict_entry_id = find_conflicting_entry_id(
+                self.hass.config_entries.async_entries(DOMAIN),
+                candidate_unique_id=unique_id,
+                current_entry_id=self._config_entry.entry_id,
+            )
+            if conflict_entry_id is not None:
+                errors["base"] = "already_configured"
+            else:
+                new_data = {
+                    CONF_INDOOR_TEMP: user_input[CONF_INDOOR_TEMP],
+                    CONF_OUTDOOR_TEMP: user_input[CONF_OUTDOOR_TEMP],
+                    CONF_PRICE_ENTITY: user_input[CONF_PRICE_ENTITY],
+                    CONF_WEATHER_FORECAST_ENTITY: user_input[CONF_WEATHER_FORECAST_ENTITY],
+                    CONF_CONTROLLED_ENTITY: controlled_entity,
+                }
+                heating_supply_entity = user_input.get(CONF_HEATING_SUPPLY_TEMP_ENTITY)
+                heating_detection_enabled = bool(heating_supply_entity) and bool(
+                    user_input.get(CONF_HEATING_DETECTION_ENABLED, DEFAULT_HEATING_DETECTION_ENABLED)
+                )
+                new_options = {
+                    CONF_TARGET_TEMPERATURE: user_input[CONF_TARGET_TEMPERATURE],
+                    CONF_PRICE_COMFORT_WEIGHT: user_input[CONF_PRICE_COMFORT_WEIGHT],
+                    CONF_CONTROL_INTERVAL_MINUTES: user_input[CONF_CONTROL_INTERVAL_MINUTES],
+                    CONF_PREDICTION_HORIZON_HOURS: user_input[CONF_PREDICTION_HORIZON_HOURS],
+                    CONF_COMFORT_TEMPERATURE_TOLERANCE: user_input[CONF_COMFORT_TEMPERATURE_TOLERANCE],
+                    CONF_MONITOR_ONLY: user_input[CONF_MONITOR_ONLY],
+                    CONF_HVAC_MODE: normalize_hvac_mode(
+                        self._config_entry.options.get(CONF_HVAC_MODE, DEFAULT_HVAC_MODE)
+                    ),
+                    CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: user_input[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET],
+                    CONF_VIRTUAL_OUTDOOR_MIN_TEMP: user_input.get(
+                        CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP
+                    ),
+                    CONF_PRICE_PENALTY_CURVE: user_input.get(
+                        CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE
+                    ),
+                    CONF_PRICE_BASELINE_WINDOW_HOURS: user_input.get(
+                        CONF_PRICE_BASELINE_WINDOW_HOURS, DEFAULT_PRICE_BASELINE_WINDOW_HOURS
+                    ),
+                    CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: user_input.get(
+                        CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
+                    ),
+                    CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: user_input.get(
+                        CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS, DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS
+                    ),
+                    CONF_CONTINUOUS_CONTROL_ENABLED: user_input.get(
+                        CONF_CONTINUOUS_CONTROL_ENABLED, DEFAULT_CONTINUOUS_CONTROL_ENABLED
+                    ),
+                    CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: user_input.get(
+                        CONF_CONTINUOUS_CONTROL_WINDOW_HOURS, DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
+                    ),
+                    CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED: user_input.get(
+                        CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED
+                    ),
+                    CONF_OVERSHOOT_WARM_BIAS_ENABLED: user_input.get(
+                        CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED
+                    ),
+                    CONF_OVERSHOOT_WARM_BIAS_CURVE: user_input.get(
+                        CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE
+                    ),
+                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED: user_input.get(
+                        CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                        DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
+                    ),
+                    CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS: user_input.get(
+                        CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                        DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
+                    ),
+                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED: user_input.get(
+                        CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                        DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
+                    ),
+                    CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA: user_input.get(
+                        CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                        DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
+                    ),
+                    CONF_HEAT_LOSS_COEFFICIENT: user_input[CONF_HEAT_LOSS_COEFFICIENT],
+                    CONF_THERMAL_RESPONSE_SEED: user_input[CONF_THERMAL_RESPONSE_SEED],
+                    CONF_LEARNING_MODEL: user_input.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
+                    CONF_RLS_FORGETTING_FACTOR: user_input.get(
+                        CONF_RLS_FORGETTING_FACTOR, DEFAULT_RLS_FORGETTING_FACTOR
+                    ),
+                    CONF_PERFORMANCE_WINDOW_HOURS: user_input.get(
+                        CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS
+                    ),
+                    CONF_HEATING_SUPPLY_TEMP_ENTITY: heating_supply_entity,
+                    CONF_HEATING_SUPPLY_TEMP_THRESHOLD: user_input.get(
+                        CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD
+                    ),
+                    CONF_HEATING_DETECTION_ENABLED: heating_detection_enabled,
+                    CONF_HEATING_SUPPLY_TEMP_HYSTERESIS: user_input.get(
+                        CONF_HEATING_SUPPLY_TEMP_HYSTERESIS, DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS
+                    ),
+                    CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS: user_input.get(
+                        CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS, DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS
+                    ),
+                    CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN: user_input.get(
+                        CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN
+                    ),
+                    CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN: user_input.get(
+                        CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN
+                    ),
+                    CONF_INITIAL_INDOOR_TEMP: user_input.get(CONF_INITIAL_INDOOR_TEMP),
+                    CONF_INITIAL_HEAT_GAIN: user_input.get(CONF_INITIAL_HEAT_GAIN),
+                    CONF_INITIAL_HEAT_LOSS_OVERRIDE: user_input.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE),
+                }
+                self.hass.config_entries.async_update_entry(
+                    self._config_entry,
+                    data=new_data,
+                    unique_id=unique_id,
+                )
+                return self.async_create_entry(title="", data=new_options)
+        return self.async_show_form(step_id="init", data_schema=self._build_options_schema(), errors=errors)
 
     def _build_options_schema(self) -> vol.Schema:
         """Build the options schema (extracted to reuse on validation errors)."""

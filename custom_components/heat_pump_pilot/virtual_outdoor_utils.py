@@ -129,53 +129,88 @@ def compute_planned_virtual_outdoor_temperatures(
         duty_ratios = _compute_duty_ratios(sequence, window_steps)
     for idx, heat_on in enumerate(sequence):
         base = outdoor[idx]
-        if continuous_control_enabled:
-            ratio = duty_ratios[idx] if duty_ratios is not None else 0.0
-            value = compute_continuous_virtual_outdoor(
-                base,
-                ratio,
-                virtual_heat_offset=offset,
-                price=prices[idx] if prices else None,
-                price_baseline=baseline,
-                price_comfort_weight=weight,
-                price_penalty_curve=price_penalty_curve,
-                price_ratio_cap=price_ratio_cap,
-                predicted_temp=predicted[idx] if predicted else None,
-                target_temperature=target,
-                comfort_temperature_tolerance=tolerance,
-                overshoot_warm_bias_enabled=overshoot_warm_bias_enabled,
-                overshoot_warm_bias_curve=overshoot_warm_bias_curve,
-                max_virtual_outdoor=max_virtual_outdoor,
-            )
-            if min_temp is not None and (not allow_below_min_when_outdoor_lower or base >= min_temp):
-                value = max(min_temp, value)
-            planned.append(value)
-            continue
-
-        value = base - offset if heat_on else base
-
-        if not heat_on and offset > 0:
-            boost_total = compute_idle_warm_bias(
-                price=prices[idx] if prices else None,
-                price_baseline=baseline,
-                price_comfort_weight=weight,
-                price_penalty_curve=price_penalty_curve,
-                price_ratio_cap=price_ratio_cap,
-                predicted_temp=predicted[idx] if predicted else None,
-                target_temperature=target,
-                comfort_temperature_tolerance=tolerance,
-                overshoot_warm_bias_enabled=overshoot_warm_bias_enabled,
-                overshoot_warm_bias_curve=overshoot_warm_bias_curve,
-                virtual_heat_offset=offset,
-            )
-            value += boost_total
-
-        value = min(value, max_virtual_outdoor)
+        value = compute_virtual_outdoor_from_mpc_step(
+            base_outdoor=base,
+            heat_on=heat_on,
+            virtual_heat_offset=offset,
+            price=prices[idx] if prices else None,
+            price_baseline=baseline,
+            price_comfort_weight=weight,
+            price_penalty_curve=price_penalty_curve,
+            price_ratio_cap=price_ratio_cap,
+            predicted_temp=predicted[idx] if predicted else None,
+            target_temperature=target,
+            comfort_temperature_tolerance=tolerance,
+            overshoot_warm_bias_enabled=overshoot_warm_bias_enabled,
+            overshoot_warm_bias_curve=overshoot_warm_bias_curve,
+            duty_ratio=duty_ratios[idx] if duty_ratios is not None else None,
+            max_virtual_outdoor=max_virtual_outdoor,
+        )
         if min_temp is not None and (not allow_below_min_when_outdoor_lower or base >= min_temp):
             value = max(min_temp, value)
         planned.append(value)
 
     return planned
+
+
+def compute_virtual_outdoor_from_mpc_step(
+    *,
+    base_outdoor: float,
+    heat_on: bool,
+    virtual_heat_offset: float,
+    price: float | None,
+    price_baseline: float | None,
+    price_comfort_weight: float,
+    price_penalty_curve: str = DEFAULT_PRICE_PENALTY_CURVE,
+    price_ratio_cap: float = DEFAULT_PRICE_RATIO_CAP,
+    predicted_temp: float | None,
+    target_temperature: float | None,
+    comfort_temperature_tolerance: float,
+    overshoot_warm_bias_enabled: bool = False,
+    overshoot_warm_bias_curve: str = "linear",
+    duty_ratio: float | None = None,
+    max_virtual_outdoor: float = 25.0,
+) -> float:
+    """Compute the current virtual outdoor temperature from an MPC step."""
+    if duty_ratio is not None:
+        return compute_continuous_virtual_outdoor(
+            base_outdoor,
+            duty_ratio,
+            virtual_heat_offset=virtual_heat_offset,
+            price=price,
+            price_baseline=price_baseline,
+            price_comfort_weight=price_comfort_weight,
+            price_penalty_curve=price_penalty_curve,
+            price_ratio_cap=price_ratio_cap,
+            predicted_temp=predicted_temp,
+            target_temperature=target_temperature,
+            comfort_temperature_tolerance=comfort_temperature_tolerance,
+            overshoot_warm_bias_enabled=overshoot_warm_bias_enabled,
+            overshoot_warm_bias_curve=overshoot_warm_bias_curve,
+            max_virtual_outdoor=max_virtual_outdoor,
+        )
+
+    try:
+        offset = max(0.0, float(virtual_heat_offset))
+    except (TypeError, ValueError):
+        offset = 0.0
+    value = float(base_outdoor) - offset if heat_on else float(base_outdoor)
+
+    if not heat_on and offset > 0.0:
+        value += compute_idle_warm_bias(
+            price=price,
+            price_baseline=price_baseline,
+            price_comfort_weight=price_comfort_weight,
+            price_penalty_curve=price_penalty_curve,
+            price_ratio_cap=price_ratio_cap,
+            predicted_temp=predicted_temp,
+            target_temperature=target_temperature,
+            comfort_temperature_tolerance=comfort_temperature_tolerance,
+            overshoot_warm_bias_enabled=overshoot_warm_bias_enabled,
+            overshoot_warm_bias_curve=overshoot_warm_bias_curve,
+            virtual_heat_offset=offset,
+        )
+    return min(value, max_virtual_outdoor)
 
 
 def compute_continuous_virtual_outdoor(

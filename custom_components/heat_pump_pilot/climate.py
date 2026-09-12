@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import math
-from decimal import Decimal, ROUND_HALF_UP
 from datetime import timedelta
 import logging
 import inspect
 from functools import partial
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from homeassistant.components.climate import (
     ClimateEntity,
@@ -21,7 +20,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.const import ATTR_TEMPERATURE, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 from homeassistant.helpers.typing import StateType
 from homeassistant.util import dt as dt_util
@@ -30,6 +29,7 @@ from .const import (
     CONF_COMFORT_TEMPERATURE_TOLERANCE,
     CONF_CONTROL_INTERVAL_MINUTES,
     CONF_CONTROLLED_ENTITY,
+    CONF_HVAC_MODE,
     CONF_HEATING_DETECTION_ENABLED,
     CONF_HEATING_SUPPLY_TEMP_ENTITY,
     CONF_HEATING_SUPPLY_TEMP_HYSTERESIS,
@@ -76,6 +76,7 @@ from .const import (
     DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS,
     DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
     DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD,
+    DEFAULT_HVAC_MODE,
     DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN,
     DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN,
     DEFAULT_LEARNING_MODEL,
@@ -120,10 +121,19 @@ from .const import (
     SIGNAL_DECISION_UPDATED,
     SIGNAL_OPTIONS_UPDATED,
 )
-from .forecast_utils import align_forecast_to_now, expand_to_steps, extract_timed_temperatures, extract_timed_values
-from .learning_utils import should_reseed_thermal_model
+from .config_helpers import HVAC_MODE_OFF, normalize_hvac_mode
+from .control_adapter import ControlAdapter
+from .control_request_utils import (
+    EffectiveHeatRequest,
+    classify_effective_heat_request,
+    resolve_effective_heat_request,
+    summarize_heating_detection_gap,
+)
+from .forecast_utils import expand_to_steps
+from .learning_utils import resolve_estimator_initial_temp, should_reseed_thermal_model
 from .mpc_controller import MpcController, ControlResult
 from .notification_utils import NotificationTracker, NotificationUpdate
+from .diagnostics_helpers import publish_entry_diagnostics
 from .performance_utils import (
     PerformanceSample,
     compute_comfort_score,
@@ -133,18 +143,19 @@ from .performance_utils import (
 )
 from .performance_history import PerformanceHistoryStorage
 from .price_history import PriceHistoryStorage
+from .forecast_service import ForecastService
 from .price_utils import (
     classify_price,
     compute_absolute_low_price_threshold,
     compute_price_baseline,
 )
-from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator, ThermalModelStorage
+from .runtime_settings import build_runtime_settings, build_thermal_model_from_options, merge_climate_options
+from .thermal_model import ThermalModelStorage
 from .virtual_outdoor_utils import (
-    compute_continuous_virtual_outdoor,
     compute_duty_ratio,
-    compute_idle_warm_bias,
     compute_overshoot_warm_bias,
     compute_planned_virtual_outdoor_temperatures,
+    compute_virtual_outdoor_from_mpc_step,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -183,6 +194,7 @@ PERFORMANCE_HISTORY_MAX_ENTRIES = 96 * 12
 CURVE_RECOMMENDATION_MIN_SAMPLES = 8
 CURVE_IDLE_HEATING_HIGH_RATIO = 0.3
 CURVE_ACTIVE_HEATING_LOW_RATIO = 0.2
+CURVE_IDLE_REQUEST_THRESHOLD = 0.1
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
@@ -207,81 +219,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._weather_entity: str = entry.data[CONF_WEATHER_FORECAST_ENTITY]
         self._controlled_entity: str | None = entry.data.get(CONF_CONTROLLED_ENTITY)
 
-        self._options = self._merge_options(entry.options)
-        self._target_temperature: float = self._options[CONF_TARGET_TEMPERATURE]
-        self._price_comfort_weight: float = self._options[CONF_PRICE_COMFORT_WEIGHT]
-        self._price_penalty_curve: str = self._options[CONF_PRICE_PENALTY_CURVE]
-        self._price_baseline_window_hours: int = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
-        self._price_absolute_low_threshold = self._options[CONF_PRICE_ABSOLUTE_LOW_THRESHOLD]
-        self._price_absolute_low_window_days: int = self._options[CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS]
-        self._continuous_control_enabled: bool = self._options[CONF_CONTINUOUS_CONTROL_ENABLED]
-        self._continuous_control_window_hours: float = self._options[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS]
-        self._control_interval: int = self._options[CONF_CONTROL_INTERVAL_MINUTES]
-        self._prediction_horizon: int = self._options[CONF_PREDICTION_HORIZON_HOURS]
-        self._comfort_tolerance: float = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
-        self._monitor_only: bool = self._options[CONF_MONITOR_ONLY]
-        self._virtual_heat_offset: float = self._options[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET]
-        self._virtual_outdoor_min_temp: float = float(
-            self._options.get(CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP)
-        )
-        self._heat_loss_coeff: float = self._options[CONF_HEAT_LOSS_COEFFICIENT]
-        self._learning_model: str = self._options[CONF_LEARNING_MODEL]
-        self._rls_forgetting_factor: float = self._options[CONF_RLS_FORGETTING_FACTOR]
-        self._learning_window_hours: int = self._options[CONF_LEARNING_WINDOW_HOURS]
-        self._performance_window_hours: int = self._options[CONF_PERFORMANCE_WINDOW_HOURS]
-        self._heating_supply_temp_entity: str | None = self._options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY)
-        self._heating_supply_temp_threshold: float = float(
-            self._options.get(CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD)
-        )
-        self._heating_detection_enabled: bool = bool(
-            self._options.get(CONF_HEATING_DETECTION_ENABLED, DEFAULT_HEATING_DETECTION_ENABLED)
-        )
-        self._heating_supply_temp_hysteresis: float = float(
-            self._options.get(CONF_HEATING_SUPPLY_TEMP_HYSTERESIS, DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS)
-        )
-        self._heating_supply_temp_debounce_seconds: float = float(
-            self._options.get(CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS, DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS)
-        )
-        self._overshoot_warm_bias_enabled: bool = bool(
-            self._options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED)
-        )
-        self._overshoot_warm_bias_curve: str = str(
-            self._options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
-        )
-        self._overshoot_warm_bias_hysteresis_enabled: bool = bool(
-            self._options.get(
-                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-            )
-        )
-        self._overshoot_warm_bias_hysteresis: float = float(
-            self._options.get(
-                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-            )
-        )
-        self._virtual_outdoor_smoothing_enabled: bool = bool(
-            self._options.get(
-                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-            )
-        )
-        self._virtual_outdoor_smoothing_alpha: float = float(
-            self._options.get(
-                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-            )
-        )
-        self._learning_supply_temp_on_margin: float = float(
-            self._options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN)
-        )
-        self._learning_supply_temp_off_margin: float = float(
-            self._options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN)
-        )
-        self._virtual_outdoor_trace_enabled: bool = bool(
-            self._options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
-        )
-        self._thermal_model = self._build_thermal_model(self._options)
+        self._options = merge_climate_options(entry.options)
+        self._settings = build_runtime_settings(self._options)
+        self._apply_runtime_settings(self._settings)
+        self._thermal_model = build_thermal_model_from_options(self._options)
         self._thermal_store = ThermalModelStorage(
             hass.config.path(".storage", f"{DOMAIN}_{entry.entry_id}_thermal.json")
         )
@@ -291,6 +232,17 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._performance_store = PerformanceHistoryStorage(
             hass.config.path(".storage", f"{DOMAIN}_{entry.entry_id}_performance.json")
         )
+        self._forecast_service = ForecastService(
+            hass,
+            price_entity=self._price_entity,
+            weather_entity=self._weather_entity,
+            outdoor_temp_entity=self._outdoor_temp_entity,
+            prediction_horizon=self._prediction_horizon,
+            weather_forecast_cache_seconds=WEATHER_FORECAST_CACHE_SECONDS,
+            weather_forecast_service_type=WEATHER_FORECAST_SERVICE_TYPE,
+            state_to_float=self._state_to_float,
+        )
+        self._control_adapter = ControlAdapter(hass, get_state_as_float=self._get_state_as_float)
 
         self._controller = MpcController(
             target_temperature=self._target_temperature,
@@ -307,18 +259,24 @@ class MpcHeatPumpClimate(ClimateEntity):
 
         self._indoor_temp: float | None = None
         self._outdoor_temp: float | None = None
-        self._hvac_mode = HVACMode.HEAT
         self._last_control_on = False
         self._last_result: ControlResult | None = None
         self._last_price_forecast: list[float] = []
         self._last_outdoor_forecast: list[float] = []
-        self._last_price_forecast_source: str = "unavailable"
-        self._last_outdoor_forecast_source: str = "unavailable"
+        self._last_price_forecast_source: str = self._forecast_service.last_price_forecast_source
+        self._last_outdoor_forecast_source: str = self._forecast_service.last_outdoor_forecast_source
         self._last_price_baseline_details: dict[str, int] = {}
         self._last_absolute_low_threshold_details: dict[str, int] = {}
         self._last_absolute_low_threshold_kind: str | None = None
         self._last_absolute_low_threshold_value: float | None = None
         self._last_duty_ratio: float | None = None
+        self._last_raw_requested_duty_ratio: float = 0.0
+        self._last_effective_requested_duty_ratio: float | None = None
+        self._last_effective_heat_request_state: str = "idle"
+        self._effective_request_same_ratio_runs = 0
+        self._last_anti_chatter_limited = False
+        self._last_anti_chatter_reason: str | None = None
+        self._last_raw_mpc_sequence_head: list[bool] = []
         self._last_virtual_outdoor_shift: float | None = None
         self._last_virtual_outdoor_raw: float | None = None
         self._last_virtual_outdoor: float | None = None
@@ -330,8 +288,6 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._price_backfill_attempts = 0
         self._price_backfill_done = False
         self._price_backfill_unsub = None
-        self._weather_forecast_cache_raw: list[Any] | None = None
-        self._weather_forecast_cache_time = None
         self._control_unsub = None
         self._sensor_unsub = None
         self._options_unsub = None
@@ -359,6 +315,44 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._attr_unique_id = f"{entry.entry_id}_climate"
         self._attr_temperature_unit = hass.config.units.temperature_unit
         self._attr_hvac_action = HVACAction.IDLE
+
+    def _apply_runtime_settings(self, settings) -> None:
+        """Apply typed runtime settings to entity attributes."""
+        self._settings = settings
+        self._target_temperature = settings.target_temperature
+        self._price_comfort_weight = settings.price_comfort_weight
+        self._price_penalty_curve = settings.price_penalty_curve
+        self._price_baseline_window_hours = settings.price_baseline_window_hours
+        self._price_absolute_low_threshold = settings.price_absolute_low_threshold
+        self._price_absolute_low_window_days = settings.price_absolute_low_window_days
+        self._continuous_control_enabled = settings.continuous_control_enabled
+        self._continuous_control_window_hours = settings.continuous_control_window_hours
+        self._control_interval = settings.control_interval_minutes
+        self._prediction_horizon = settings.prediction_horizon_hours
+        self._comfort_tolerance = settings.comfort_temperature_tolerance
+        self._monitor_only = settings.monitor_only
+        self._hvac_mode = HVACMode(normalize_hvac_mode(settings.hvac_mode, DEFAULT_HVAC_MODE))
+        self._virtual_heat_offset = float(settings.virtual_outdoor_heat_offset)
+        self._virtual_outdoor_min_temp = float(settings.virtual_outdoor_min_temp)
+        self._heat_loss_coeff = float(settings.heat_loss_coefficient)
+        self._learning_model = settings.learning_model
+        self._rls_forgetting_factor = settings.rls_forgetting_factor
+        self._learning_window_hours = settings.learning_window_hours
+        self._performance_window_hours = settings.performance_window_hours
+        self._heating_supply_temp_entity = settings.heating_supply_temp_entity
+        self._heating_supply_temp_threshold = float(settings.heating_supply_temp_threshold)
+        self._heating_detection_enabled = bool(settings.heating_detection_enabled)
+        self._heating_supply_temp_hysteresis = float(settings.heating_supply_temp_hysteresis)
+        self._heating_supply_temp_debounce_seconds = float(settings.heating_supply_temp_debounce_seconds)
+        self._overshoot_warm_bias_enabled = bool(settings.overshoot_warm_bias_enabled)
+        self._overshoot_warm_bias_curve = str(settings.overshoot_warm_bias_curve)
+        self._overshoot_warm_bias_hysteresis_enabled = bool(settings.overshoot_warm_bias_hysteresis_enabled)
+        self._overshoot_warm_bias_hysteresis = float(settings.overshoot_warm_bias_hysteresis)
+        self._virtual_outdoor_smoothing_enabled = bool(settings.virtual_outdoor_smoothing_enabled)
+        self._virtual_outdoor_smoothing_alpha = float(settings.virtual_outdoor_smoothing_alpha)
+        self._learning_supply_temp_on_margin = float(settings.learning_supply_temp_on_margin)
+        self._learning_supply_temp_off_margin = float(settings.learning_supply_temp_off_margin)
+        self._virtual_outdoor_trace_enabled = bool(settings.virtual_outdoor_trace_enabled)
 
     async def async_added_to_hass(self) -> None:
         """Register listeners and kick off control loop."""
@@ -605,6 +599,15 @@ class MpcHeatPumpClimate(ClimateEntity):
             suggested_heat_on = entry.get("suggested_heat_on")
             if suggested_heat_on not in (None, True, False):
                 suggested_heat_on = None
+            requested_duty_ratio_raw = entry.get("requested_duty_ratio")
+            try:
+                requested_duty_ratio = (
+                    max(0.0, min(1.0, float(requested_duty_ratio_raw)))
+                    if requested_duty_ratio_raw is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                requested_duty_ratio = None
             price_raw = entry.get("price")
             prediction_raw = entry.get("prediction_error")
             try:
@@ -624,6 +627,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                     price=price,
                     prediction_error=prediction_error,
                     suggested_heat_on=suggested_heat_on,
+                    requested_duty_ratio=requested_duty_ratio,
                 )
             )
         if history:
@@ -649,6 +653,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                     "price": sample.price,
                     "prediction_error": sample.prediction_error,
                     "suggested_heat_on": sample.suggested_heat_on,
+                    "requested_duty_ratio": sample.requested_duty_ratio,
                 }
             )
         payload = {"version": 1, "history": serialized}
@@ -741,6 +746,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         baseline_details = dict(self._last_price_baseline_details or {})
         absolute_details = dict(self._last_absolute_low_threshold_details or {})
         heating_detected = self._get_heating_detected(dt_util.utcnow())
+        heating_gap = summarize_heating_detection_gap(
+            effective_requested_duty_ratio=self._last_effective_requested_duty_ratio,
+            heating_detected=heating_detected,
+        )
         nominal_heat_power_kw = NOMINAL_HEAT_POWER_KW
         time_step_hours = self._controller.time_step_hours
         cap_kwh_per_c = None
@@ -775,6 +784,12 @@ class MpcHeatPumpClimate(ClimateEntity):
             "continuous_control_enabled": self._continuous_control_enabled,
             "continuous_control_window_hours": self._continuous_control_window_hours,
             "continuous_control_duty_ratio": self._last_duty_ratio,
+            "raw_requested_duty_ratio": self._last_raw_requested_duty_ratio,
+            "effective_requested_duty_ratio": self._last_effective_requested_duty_ratio,
+            "effective_heat_request_state": self._last_effective_heat_request_state,
+            "raw_mpc_sequence_head": list(self._last_raw_mpc_sequence_head),
+            "anti_chatter_limited": self._last_anti_chatter_limited,
+            "anti_chatter_reason": self._last_anti_chatter_reason,
             "continuous_control_virtual_outdoor_shift": self._last_virtual_outdoor_shift,
             "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
             "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
@@ -799,6 +814,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             "learning_model": self._learning_model,
             "rls_forgetting_factor": self._rls_forgetting_factor,
             "heating_detected": heating_detected,
+            **heating_gap,
             "heating_supply_temperature": self._get_state_as_float(self._heating_supply_temp_entity)
             if self._heating_supply_temp_entity
             else None,
@@ -846,9 +862,19 @@ class MpcHeatPumpClimate(ClimateEntity):
             return
         self._hvac_mode = hvac_mode
         if hvac_mode == HVACMode.OFF:
+            await self._persist_options({CONF_HVAC_MODE: HVAC_MODE_OFF})
+            self._last_raw_requested_duty_ratio = 0.0
+            self._last_effective_requested_duty_ratio = 0.0
+            self._last_effective_heat_request_state = classify_effective_heat_request(0.0)
+            self._effective_request_same_ratio_runs = 0
+            self._last_anti_chatter_limited = False
+            self._last_anti_chatter_reason = None
+            self._last_raw_mpc_sequence_head = []
             self._last_virtual_outdoor = self._compute_off_virtual_outdoor()
+            self._last_virtual_outdoor_raw = self._last_virtual_outdoor
             await self._apply_control(False)
         else:
+            await self._persist_options({CONF_HVAC_MODE: hvac_mode.value})
             await self._async_run_control()
         self.async_write_ha_state()
 
@@ -857,10 +883,20 @@ class MpcHeatPumpClimate(ClimateEntity):
         if self._hvac_mode == HVACMode.OFF:
             now = dt_util.utcnow()
             self._last_control_on = False
-            self._last_virtual_outdoor = None
-            self._last_virtual_outdoor_raw = None
+            self._last_duty_ratio = 0.0
+            self._last_raw_requested_duty_ratio = 0.0
+            self._last_effective_requested_duty_ratio = 0.0
+            self._last_effective_heat_request_state = classify_effective_heat_request(0.0)
+            self._effective_request_same_ratio_runs = 0
+            self._last_anti_chatter_limited = False
+            self._last_anti_chatter_reason = None
+            self._last_raw_mpc_sequence_head = []
+            self._last_virtual_outdoor = self._compute_off_virtual_outdoor()
+            self._last_virtual_outdoor_raw = self._last_virtual_outdoor
+            self._last_virtual_outdoor_shift = 0.0
             self._last_overshoot_bias_delta = None
             self._overshoot_warm_bias_active = None
+            await self._apply_control(False)
             self._publish_decision()
             await self._async_update_notifications(now)
             self.async_write_ha_state()
@@ -885,7 +921,7 @@ class MpcHeatPumpClimate(ClimateEntity):
 
             self._update_thermal_model(now, indoor_temp, self._outdoor_temp)
             steps = max(1, int(self._prediction_horizon / self._controller.time_step_hours))
-            price_forecast = self._extract_price_forecast(now)
+            price_forecast = self._forecast_service.extract_price_forecast(now)
             baseline, baseline_details = compute_price_baseline(
                 history=self._price_history,
                 forecast=price_forecast,
@@ -893,10 +929,15 @@ class MpcHeatPumpClimate(ClimateEntity):
                 window_hours=self._price_baseline_window_hours,
                 baseline_floor=PRICE_BASELINE_FLOOR,
             )
-            outdoor_forecast = await self._async_build_outdoor_forecast(now)
+            self._last_price_forecast_source = self._forecast_service.last_price_forecast_source
+            outdoor_forecast = await self._forecast_service.build_outdoor_forecast(
+                now,
+                outdoor_temp=self._outdoor_temp,
+            )
+            self._last_outdoor_forecast_source = self._forecast_service.last_outdoor_forecast_source
 
             price_expanded = expand_to_steps(price_forecast, steps, self._controller.time_step_hours)
-            price_for_mpc = self._normalize_series(price_expanded, steps, 1.0)
+            price_for_mpc = self._forecast_service.normalize_series(price_expanded, steps, 1.0)
             outdoor_for_mpc = expand_to_steps(outdoor_forecast, steps, self._controller.time_step_hours)
             self._last_price_forecast = price_for_mpc
             self._last_outdoor_forecast = outdoor_for_mpc
@@ -911,13 +952,30 @@ class MpcHeatPumpClimate(ClimateEntity):
                 price_baseline_override=baseline,
             )
             self._last_result = result
+            self._last_raw_mpc_sequence_head = self._raw_mpc_sequence_head(result.sequence if result else None)
             duty_ratio = None
             if self._continuous_control_enabled and result and result.sequence:
                 window_steps = self._continuous_control_window_steps()
                 duty_ratio = compute_duty_ratio(result.sequence, 0, window_steps)
             self._last_duty_ratio = duty_ratio
+            predicted_control_temp = None
+            if result and len(result.predicted_temperatures) > 1:
+                predicted_control_temp = result.predicted_temperatures[1]
+            elif result and result.predicted_temperatures:
+                predicted_control_temp = result.predicted_temperatures[0]
+            effective_request = self._build_effective_heat_request(
+                raw_heat_on=decision,
+                raw_duty_ratio=duty_ratio,
+                predicted_temp=predicted_control_temp,
+            )
+            self._last_raw_requested_duty_ratio = effective_request.raw_requested_duty_ratio
+            self._commit_effective_heat_request(effective_request)
             self._last_virtual_outdoor = self._compute_virtual_outdoor(
-                decision, outdoor_for_mpc, duty_ratio=duty_ratio
+                decision,
+                outdoor_for_mpc,
+                duty_ratio=effective_request.effective_requested_duty_ratio
+                if self._continuous_control_enabled
+                else duty_ratio,
             )
             await self._apply_control(decision)
             self._last_control_on = decision
@@ -938,6 +996,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                 price=current_price,
                 prediction_error=prediction_error,
                 suggested_heat_on=self._last_control_on,
+                requested_duty_ratio=effective_request.effective_requested_duty_ratio,
             )
             self._publish_decision()
             await self._async_update_notifications(now)
@@ -1162,8 +1221,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             return None
 
         if not self._monitor_only:
-            if self._continuous_control_enabled and self._last_duty_ratio is not None:
-                return float(self._last_duty_ratio)
+            if not self._controlled_entity:
+                return None
+            if self._continuous_control_enabled and self._last_effective_requested_duty_ratio is not None:
+                return float(self._last_effective_requested_duty_ratio)
             return float(self._last_control_on)
 
         entity_id = self._controlled_entity
@@ -1201,6 +1262,53 @@ class MpcHeatPumpClimate(ClimateEntity):
             hours = DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
         steps_per_hour = int(round(1 / self._controller.time_step_hours)) or 1
         return max(1, int(round(hours * steps_per_hour)))
+
+    def _uses_virtual_outdoor_control(self) -> bool:
+        """Return True when the target entity is driven via a virtual outdoor setpoint."""
+        if not self._controlled_entity:
+            return False
+        domain = self._controlled_entity.split(".")[0]
+        return domain in {"number", "ohmonwifiplus"}
+
+    def _build_effective_heat_request(
+        self,
+        *,
+        raw_heat_on: bool,
+        raw_duty_ratio: float | None,
+        predicted_temp: float | None,
+    ) -> EffectiveHeatRequest:
+        """Resolve the effective request after internal anti-chatter limiting."""
+        raw_requested_duty_ratio = raw_duty_ratio if raw_duty_ratio is not None else (1.0 if raw_heat_on else 0.0)
+        anti_chatter_enabled = self._continuous_control_enabled and self._uses_virtual_outdoor_control()
+        return resolve_effective_heat_request(
+            raw_requested_duty_ratio=raw_requested_duty_ratio,
+            previous_effective_duty_ratio=self._last_effective_requested_duty_ratio,
+            previous_same_ratio_runs=self._effective_request_same_ratio_runs,
+            predicted_temp=predicted_temp,
+            target_temperature=self._target_temperature,
+            comfort_tolerance=self._comfort_tolerance,
+            anti_chatter_enabled=anti_chatter_enabled,
+        )
+
+    def _commit_effective_heat_request(self, request: EffectiveHeatRequest) -> None:
+        """Persist the latest effective request for future anti-chatter decisions."""
+        previous = self._last_effective_requested_duty_ratio
+        current = request.effective_requested_duty_ratio
+        if previous is not None and abs(previous - current) < 1e-6:
+            self._effective_request_same_ratio_runs += 1
+        else:
+            self._effective_request_same_ratio_runs = 1
+        self._last_effective_requested_duty_ratio = current
+        self._last_effective_heat_request_state = request.effective_heat_request_state
+        self._last_anti_chatter_limited = request.anti_chatter_limited
+        self._last_anti_chatter_reason = request.anti_chatter_reason
+
+    @staticmethod
+    def _raw_mpc_sequence_head(sequence: list[bool] | None, *, max_entries: int = 12) -> list[bool]:
+        """Return a recorder-safe prefix of the raw MPC sequence."""
+        if not sequence:
+            return []
+        return [bool(value) for value in sequence[:max_entries]]
 
     async def _handle_control_interval(self, now) -> None:
         """Callback for periodic control loop."""
@@ -1270,79 +1378,19 @@ class MpcHeatPumpClimate(ClimateEntity):
     def _handle_entry_update(self) -> None:
         """Handle config entry option updates."""
         previous_options = self._options
-        self._options = self._merge_options(self.config_entry.options)
-        self._target_temperature = self._options[CONF_TARGET_TEMPERATURE]
-        self._price_comfort_weight = self._options[CONF_PRICE_COMFORT_WEIGHT]
-        self._price_penalty_curve = self._options[CONF_PRICE_PENALTY_CURVE]
-        self._price_baseline_window_hours = self._options[CONF_PRICE_BASELINE_WINDOW_HOURS]
-        self._price_absolute_low_threshold = self._options[CONF_PRICE_ABSOLUTE_LOW_THRESHOLD]
-        self._price_absolute_low_window_days = self._options[CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS]
-        self._continuous_control_enabled = self._options[CONF_CONTINUOUS_CONTROL_ENABLED]
-        self._continuous_control_window_hours = self._options[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS]
-        self._control_interval = self._options[CONF_CONTROL_INTERVAL_MINUTES]
-        self._prediction_horizon = self._options[CONF_PREDICTION_HORIZON_HOURS]
-        self._comfort_tolerance = self._options[CONF_COMFORT_TEMPERATURE_TOLERANCE]
-        self._monitor_only = self._options[CONF_MONITOR_ONLY]
-        self._virtual_heat_offset = self._options[CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET]
-        self._virtual_outdoor_min_temp = float(
-            self._options.get(CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP)
+        self._indoor_temp_entity = self.config_entry.data[CONF_INDOOR_TEMP]
+        self._outdoor_temp_entity = self.config_entry.data[CONF_OUTDOOR_TEMP]
+        self._price_entity = self.config_entry.data[CONF_PRICE_ENTITY]
+        self._weather_entity = self.config_entry.data[CONF_WEATHER_FORECAST_ENTITY]
+        self._controlled_entity = self.config_entry.data.get(CONF_CONTROLLED_ENTITY)
+        self._options = merge_climate_options(self.config_entry.options)
+        self._apply_runtime_settings(build_runtime_settings(self._options))
+        self._forecast_service.update_entities(
+            price_entity=self._price_entity,
+            weather_entity=self._weather_entity,
+            outdoor_temp_entity=self._outdoor_temp_entity,
+            prediction_horizon=self._prediction_horizon,
         )
-        self._learning_model = self._options[CONF_LEARNING_MODEL]
-        self._rls_forgetting_factor = self._options[CONF_RLS_FORGETTING_FACTOR]
-        self._learning_window_hours = self._options[CONF_LEARNING_WINDOW_HOURS]
-        self._heating_supply_temp_entity = self._options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY)
-        self._heating_supply_temp_threshold = float(
-            self._options.get(CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD)
-        )
-        self._heating_detection_enabled = bool(
-            self._options.get(CONF_HEATING_DETECTION_ENABLED, DEFAULT_HEATING_DETECTION_ENABLED)
-        )
-        self._heating_supply_temp_hysteresis = float(
-            self._options.get(CONF_HEATING_SUPPLY_TEMP_HYSTERESIS, DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS)
-        )
-        self._heating_supply_temp_debounce_seconds = float(
-            self._options.get(CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS, DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS)
-        )
-        self._overshoot_warm_bias_enabled = bool(
-            self._options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED)
-        )
-        self._overshoot_warm_bias_curve = str(
-            self._options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
-        )
-        self._overshoot_warm_bias_hysteresis_enabled = bool(
-            self._options.get(
-                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-            )
-        )
-        self._overshoot_warm_bias_hysteresis = float(
-            self._options.get(
-                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS,
-            )
-        )
-        self._virtual_outdoor_smoothing_enabled = bool(
-            self._options.get(
-                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-            )
-        )
-        self._virtual_outdoor_smoothing_alpha = float(
-            self._options.get(
-                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA,
-            )
-        )
-        self._learning_supply_temp_on_margin = float(
-            self._options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN)
-        )
-        self._learning_supply_temp_off_margin = float(
-            self._options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN, DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN)
-        )
-        self._virtual_outdoor_trace_enabled = bool(
-            self._options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
-        )
-        self._performance_window_hours = self._options[CONF_PERFORMANCE_WINDOW_HOURS]
         now = dt_util.utcnow()
         if self._heating_detection_active():
             self._reset_heating_duty_cycle(now)
@@ -1363,7 +1411,11 @@ class MpcHeatPumpClimate(ClimateEntity):
         # This avoids wiping learning progress when a user tweaks unrelated settings like the
         # heating detection threshold/hysteresis.
         if model_changed or rls_changed:
-            self._thermal_model = self._build_thermal_model(self._options)
+            rebuilt_options = dict(self._options)
+            initial_temp = resolve_estimator_initial_temp(rebuilt_options, self._indoor_temp)
+            if initial_temp is not None:
+                rebuilt_options[CONF_INITIAL_INDOOR_TEMP] = initial_temp
+            self._thermal_model = build_thermal_model_from_options(rebuilt_options)
             self._heat_loss_coeff = self._thermal_model.heat_loss_coeff
             self._model_history = []
         elif should_reseed_thermal_model(previous_options, self._options):
@@ -1371,9 +1423,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             initial_heat_loss = self._options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE)
             if initial_heat_loss is None:
                 initial_heat_loss = self._heat_loss_coeff
-            initial_temp = self._options.get(CONF_INITIAL_INDOOR_TEMP)
-            if initial_temp is None:
-                initial_temp = self._indoor_temp
+            initial_temp = resolve_estimator_initial_temp(self._options, self._indoor_temp)
             self._thermal_model.reseed(
                 seed=self._options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
                 initial_heat_loss=initial_heat_loss,
@@ -1403,149 +1453,14 @@ class MpcHeatPumpClimate(ClimateEntity):
 
     async def _apply_control(self, heat_on: bool) -> None:
         """Apply the control decision to the underlying entity."""
-        if self._monitor_only:
-            return
-
-        if self._hvac_mode == HVACMode.OFF:
-            heat_on = False
-
-        entity_id = self._controlled_entity
-        if entity_id is None:
-            return
-
-        domain = entity_id.split(".")[0]
-
-        if domain == "number":
-            # Common for heat pumps controlled via an external "virtual outdoor" setpoint.
-            if self._last_virtual_outdoor is None:
-                return
-            desired = float(self._last_virtual_outdoor)
-
-            state_obj = self.hass.states.get(entity_id)
-            step = None
-            if state_obj is not None:
-                min_attr = state_obj.attributes.get("min")
-                max_attr = state_obj.attributes.get("max")
-                step_attr = state_obj.attributes.get("step")
-                try:
-                    minimum = float(min_attr) if min_attr is not None else None
-                except (TypeError, ValueError):
-                    minimum = None
-                try:
-                    maximum = float(max_attr) if max_attr is not None else None
-                except (TypeError, ValueError):
-                    maximum = None
-                if minimum is not None:
-                    desired = max(minimum, desired)
-                if maximum is not None:
-                    desired = min(maximum, desired)
-                try:
-                    step = float(step_attr) if step_attr is not None else None
-                except (TypeError, ValueError):
-                    step = None
-
-            desired_str = None
-            desired_float = desired
-            if step is not None and step > 0:
-                step_dec = Decimal(str(step))
-                desired_dec = Decimal(str(desired_float))
-                rounded_dec = (desired_dec / step_dec).to_integral_value(rounding=ROUND_HALF_UP) * step_dec
-                decimals = max(0, -step_dec.as_tuple().exponent)
-                desired_float = float(rounded_dec)
-                desired_str = f"{desired_float:.{decimals}f}"
-            else:
-                desired_str = str(desired_float)
-
-            current_value = self._get_state_as_float(entity_id)
-            if current_value is not None and abs(current_value - desired_float) < 0.01:
-                return
-            await self.hass.services.async_call(
-                "number",
-                "set_value",
-                {"entity_id": entity_id, "value": desired_str},
-                blocking=False,
-            )
-            return
-
-        if domain == "switch":
-            # Only skip if the current state already matches the desired action.
-            current_on = None
-            state_obj = self.hass.states.get(entity_id)
-            if state_obj is not None:
-                current_on = state_obj.state.lower() == "on"
-            if current_on is not None and current_on == heat_on:
-                return
-
-            service = "turn_on" if heat_on else "turn_off"
-            await self.hass.services.async_call("switch", service, {"entity_id": entity_id}, blocking=False)
-            return
-
-        if domain == "climate":
-            if heat_on:
-                await self.hass.services.async_call(
-                    "climate",
-                    "set_temperature",
-                    {"entity_id": entity_id, ATTR_TEMPERATURE: self._target_temperature},
-                    blocking=False,
-                )
-                await self.hass.services.async_call(
-                    "climate",
-                    "set_hvac_mode",
-                    {"entity_id": entity_id, "hvac_mode": HVACMode.HEAT},
-                    blocking=False,
-                )
-            else:
-                await self.hass.services.async_call(
-                    "climate", "set_hvac_mode", {"entity_id": entity_id, "hvac_mode": HVACMode.OFF}, blocking=False
-                )
-            return
-
-        if domain == "ohmonwifiplus":
-            # Best-effort support for ohmonwifiplus custom entities.
-            await self._call_turn_on(domain, entity_id)
-            await self._call_temperature_service(domain, entity_id, value=self._last_virtual_outdoor)
-            return
-
-        # Generic handler for other domains that expose set_temperature/turn_off services.
-        if heat_on:
-            # Try to turn on first if available, then set a temperature.
-            await self._call_turn_on(domain, entity_id)
-            if await self._call_temperature_service(domain, entity_id, value=self._target_temperature):
-                return
-        else:
-            handled = await self._call_turn_off(domain, entity_id)
-            if handled:
-                return
-
-        _LOGGER.debug("Unsupported controlled entity domain for %s", entity_id)
-
-    async def _call_temperature_service(self, domain: str, entity_id: str, value: float | None) -> bool:
-        """Try to call a set_temperature-like service for non-climate entities."""
-        if not self.hass.services.has_service(domain, "set_temperature"):
-            return False
-        if value is None:
-            return False
-        await self.hass.services.async_call(
-            domain,
-            "set_temperature",
-            {"entity_id": entity_id, ATTR_TEMPERATURE: value},
-            blocking=False,
+        await self._control_adapter.apply(
+            monitor_only=self._monitor_only,
+            hvac_mode=self._hvac_mode,
+            controlled_entity=self._controlled_entity,
+            heat_on=heat_on,
+            target_temperature=self._target_temperature,
+            virtual_outdoor=self._last_virtual_outdoor,
         )
-        return True
-
-    async def _call_turn_off(self, domain: str, entity_id: str) -> bool:
-        """Try to call a turn_off service if available."""
-        if not self.hass.services.has_service(domain, "turn_off"):
-            return False
-        await self.hass.services.async_call(domain, "turn_off", {"entity_id": entity_id}, blocking=False)
-        return True
-
-    async def _call_turn_on(self, domain: str, entity_id: str) -> bool:
-        """Try to call a turn_on service if available."""
-        if not self.hass.services.has_service(domain, "turn_on"):
-            return False
-        await self.hass.services.async_call(domain, "turn_on", {"entity_id": entity_id}, blocking=False)
-        return True
 
     def _adjust_predicted_temp_for_overshoot_bias(self, predicted_temp: float | None) -> float | None:
         """Apply overshoot hysteresis and return a temperature for bias calculations."""
@@ -1638,53 +1553,27 @@ class MpcHeatPumpClimate(ClimateEntity):
 
         offset = max(0.0, float(self._virtual_heat_offset))
         price_ratio_cap = getattr(self._controller, "price_ratio_cap", DEFAULT_PRICE_RATIO_CAP)
-        adjusted_predicted = self._adjust_predicted_temp_for_overshoot_bias(self._indoor_temp)
-        if self._continuous_control_enabled and duty_ratio is not None:
-            raw_value = compute_continuous_virtual_outdoor(
-                base,
-                duty_ratio,
-                virtual_heat_offset=offset,
-                price=self._last_price_forecast[0] if self._last_price_forecast else None,
-                price_baseline=self._last_result.price_baseline if self._last_result else None,
-                price_comfort_weight=self._price_comfort_weight,
-                price_penalty_curve=self._price_penalty_curve,
-                price_ratio_cap=price_ratio_cap,
-                predicted_temp=adjusted_predicted,
-                target_temperature=self._target_temperature,
-                comfort_temperature_tolerance=self._comfort_tolerance,
-                overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
-                overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
-                max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
-            )
-            raw_value = self._apply_virtual_outdoor_min_temp(raw_value, base=base)
-            value = self._apply_virtual_outdoor_smoothing(raw_value, base=base, offset=offset)
-            value = self._apply_virtual_outdoor_min_temp(value, base=base)
-            self._last_virtual_outdoor_raw = raw_value
-            self._last_virtual_outdoor_shift = value - base
-            return value
-
-        if heat_on:
-            raw_value = base - offset
-        else:
-            # When idle, let the pump see the actual outdoor temp (or a safe fallback).
-            raw_value = base
-            if offset > 0:
-                boost_total = compute_idle_warm_bias(
-                    price=self._last_price_forecast[0] if self._last_price_forecast else None,
-                    price_baseline=self._last_result.price_baseline if self._last_result else None,
-                    price_comfort_weight=self._price_comfort_weight,
-                    price_penalty_curve=self._price_penalty_curve,
-                    price_ratio_cap=price_ratio_cap,
-                    predicted_temp=adjusted_predicted,
-                    target_temperature=self._target_temperature,
-                    comfort_temperature_tolerance=self._comfort_tolerance,
-                    overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
-                    overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
-                    virtual_heat_offset=offset,
-                )
-                raw_value += boost_total
-
-        raw_value = min(raw_value, MAX_VIRTUAL_OUTDOOR)
+        predicted_temp = self._indoor_temp
+        if self._last_result and self._last_result.predicted_temperatures:
+            predicted_temp = self._last_result.predicted_temperatures[0]
+        adjusted_predicted = self._adjust_predicted_temp_for_overshoot_bias(predicted_temp)
+        raw_value = compute_virtual_outdoor_from_mpc_step(
+            base_outdoor=base,
+            heat_on=heat_on,
+            virtual_heat_offset=offset,
+            price=self._last_price_forecast[0] if self._last_price_forecast else None,
+            price_baseline=self._last_result.price_baseline if self._last_result else None,
+            price_comfort_weight=self._price_comfort_weight,
+            price_penalty_curve=self._price_penalty_curve,
+            price_ratio_cap=price_ratio_cap,
+            predicted_temp=adjusted_predicted,
+            target_temperature=self._target_temperature,
+            comfort_temperature_tolerance=self._comfort_tolerance,
+            overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
+            overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
+            duty_ratio=duty_ratio if self._continuous_control_enabled else None,
+            max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
+        )
         raw_value = self._apply_virtual_outdoor_min_temp(raw_value, base=base)
         value = self._apply_virtual_outdoor_smoothing(raw_value, base=base, offset=offset)
         value = self._apply_virtual_outdoor_min_temp(value, base=base)
@@ -1701,120 +1590,6 @@ class MpcHeatPumpClimate(ClimateEntity):
         if base is None:
             base = VIRTUAL_OUTDOOR_IDLE_FALLBACK
         return min(base, MAX_VIRTUAL_OUTDOOR)
-
-    async def _async_build_outdoor_forecast(self, now) -> list[float]:
-        """Collect outdoor temperature forecast.
-
-        - Supports sensor entities exposing ``forecast`` attributes.
-        - Supports weather entities exposing ``forecast`` attributes.
-        - Falls back to the ``weather.get_forecasts`` service when attributes are missing.
-        - Falls back to the configured outdoor temperature sensor when no forecast is available.
-        """
-        now = dt_util.as_utc(now)
-
-        weather_state = self.hass.states.get(self._weather_entity)
-        if weather_state:
-            raw = weather_state.attributes.get("forecast")
-            forecast = self._extract_outdoor_forecast_from_raw(raw, now)
-            if forecast:
-                self._last_outdoor_forecast_source = "weather_attribute"
-                if isinstance(raw, list):
-                    self._weather_forecast_cache_raw = list(raw)
-                    self._weather_forecast_cache_time = dt_util.utcnow()
-                return forecast
-
-        if self._weather_entity.startswith("weather."):
-            cached = self._extract_outdoor_forecast_from_cache(now)
-            if cached:
-                self._last_outdoor_forecast_source = "weather_cache"
-                return cached
-
-            raw = await self._async_fetch_weather_forecast_service()
-            forecast = self._extract_outdoor_forecast_from_raw(raw, now)
-            if forecast:
-                self._last_outdoor_forecast_source = "weather_service"
-                return forecast
-
-        base = self._outdoor_temp if self._outdoor_temp is not None else self._get_state_as_float(
-            self._outdoor_temp_entity
-        )
-        if base is None:
-            self._last_outdoor_forecast_source = "unavailable"
-            return []
-        horizon = max(1, int(self._prediction_horizon))
-        self._last_outdoor_forecast_source = "outdoor_sensor_flat_fallback"
-        return [base] * horizon
-
-    def _extract_outdoor_forecast_from_cache(self, now) -> list[float]:
-        """Return a cached weather forecast if it's still fresh."""
-        raw = self._weather_forecast_cache_raw
-        cached_at = self._weather_forecast_cache_time
-        if not raw or cached_at is None:
-            return []
-        try:
-            cached_at = dt_util.as_utc(cached_at)
-        except (TypeError, ValueError):
-            return []
-        if (now - cached_at).total_seconds() >= WEATHER_FORECAST_CACHE_SECONDS:
-            return []
-        return self._extract_outdoor_forecast_from_raw(raw, now)
-
-    def _extract_outdoor_forecast_from_raw(self, raw: Any, now) -> list[float]:
-        """Extract an aligned temperature forecast from raw weather forecast data."""
-        if not raw:
-            return []
-        timed = extract_timed_temperatures(raw)
-        aligned = align_forecast_to_now(timed, now)
-        if aligned:
-            return aligned
-        return self._extract_temperatures(raw)
-
-    async def _async_fetch_weather_forecast_service(self) -> list[Any]:
-        """Fetch an hourly forecast via ``weather.get_forecasts`` when available."""
-        if not self._weather_entity.startswith("weather."):
-            return []
-        if not self.hass.services.has_service("weather", "get_forecasts"):
-            return []
-
-        data = {"entity_id": self._weather_entity, "type": WEATHER_FORECAST_SERVICE_TYPE}
-        response = None
-        try:
-            response = await self.hass.services.async_call(
-                "weather",
-                "get_forecasts",
-                data,
-                blocking=True,
-                return_response=True,
-            )
-        except TypeError:
-            # Older HA versions don't support service responses; fall back to sensor-only behaviour.
-            return []
-        except Exception as err:
-            _LOGGER.debug("Weather forecast fetch failed for %s: %s", self._weather_entity, err)
-            return []
-
-        raw: Any = None
-        if isinstance(response, dict):
-            candidate = response.get(self._weather_entity)
-            if isinstance(candidate, dict):
-                raw = candidate.get("forecast")
-            elif isinstance(candidate, list):
-                raw = candidate
-            elif "forecast" in response:
-                raw = response.get("forecast")
-            elif len(response) == 1:
-                only = next(iter(response.values()))
-                if isinstance(only, dict):
-                    raw = only.get("forecast")
-                elif isinstance(only, list):
-                    raw = only
-
-        if not isinstance(raw, list):
-            return []
-
-        self._weather_forecast_cache_raw = list(raw)
-        self._weather_forecast_cache_time = dt_util.utcnow()
-        return list(raw)
 
     def _request_control_run(self) -> None:
         """Coalesce control requests to avoid stacking many queued tasks."""
@@ -1904,361 +1679,6 @@ class MpcHeatPumpClimate(ClimateEntity):
             return
         self._control_task = None
 
-    @staticmethod
-    def _normalize_series(values: Sequence[float] | None, steps: int, fallback: float) -> list[float]:
-        """Normalize a list of floats to a specific length."""
-        normalized: list[float] = []
-        if values:
-            for val in values:
-                try:
-                    numeric = float(val)
-                except (TypeError, ValueError):
-                    continue
-                if not math.isfinite(numeric):
-                    continue
-                normalized.append(numeric)
-        if not normalized:
-            normalized = [fallback]
-        if len(normalized) < steps:
-            normalized.extend([normalized[-1]] * (steps - len(normalized)))
-        else:
-            normalized = normalized[:steps]
-        return normalized
-
-    @staticmethod
-    def _trim_series(values: Sequence[Any] | None, max_entries: int) -> list[Any] | None:
-        """Return a bounded list for recorder-safe attributes."""
-        if values is None:
-            return None
-        try:
-            series = list(values)
-        except TypeError:
-            return None
-        if max_entries <= 0:
-            return []
-        if len(series) > max_entries:
-            return series[-max_entries:]
-        return series
-
-    def _extract_price_forecast(self, now) -> list[float]:
-        """Extract price forecast from the configured entity."""
-        state = self.hass.states.get(self._price_entity)
-        if not state:
-            self._last_price_forecast_source = "unavailable"
-            return []
-
-        attrs = state.attributes
-        forecast: list[float] = []
-        source = "attribute_forecast"
-
-        # Prefer Nordpool's raw lists so we can align the series to 'now'.
-        raw_today = attrs.get("raw_today")
-        raw_tomorrow = attrs.get("raw_tomorrow")
-        if raw_today or raw_tomorrow:
-            source = "nordpool_raw"
-            timed = extract_timed_values(raw_today)
-            timed.extend(extract_timed_values(raw_tomorrow))
-            forecast = align_forecast_to_now(timed, now)
-        else:
-            if "prices" in attrs:
-                forecast.extend(self._extract_price_list(attrs.get("prices")))
-            if "forecast" in attrs and not forecast:
-                forecast.extend(self._extract_price_list(attrs.get("forecast")))
-
-        current_price = self._state_to_float(state.state)
-        if current_price is not None and not forecast:
-            forecast.append(current_price)
-            source = "current_price_only"
-
-        if not forecast:
-            source = "empty"
-        self._last_price_forecast_source = source
-        return forecast
-
-    def _extract_temperatures(self, forecast_data: Iterable[Any] | None) -> list[float]:
-        """Extract temperature values from forecast data."""
-        temperatures: list[float] = []
-        if not forecast_data:
-            return temperatures
-        for item in forecast_data:
-            if not isinstance(item, dict):
-                continue
-            temp = item.get("temperature") or item.get("temp")
-            if temp is None:
-                continue
-            value = self._state_to_float(temp)
-            if value is not None:
-                temperatures.append(value)
-        return temperatures
-
-    def _extract_price_list(self, raw: Iterable[Any] | None) -> list[float]:
-        """Extract a list of price values from raw attributes."""
-        prices: list[float] = []
-        if not raw:
-            return prices
-
-        for item in raw:
-            if isinstance(item, (int, float, str)):
-                val = self._state_to_float(item)
-                if val is not None:
-                    prices.append(val)
-                continue
-
-            if not isinstance(item, dict):
-                continue
-
-            value = item.get("value") or item.get("price") or item.get("average") or item.get("total")
-            numeric = self._state_to_float(value)
-            if numeric is not None:
-                prices.append(numeric)
-        return prices
-
-    def _merge_options(self, options: dict[str, Any]) -> dict[str, Any]:
-        """Merge entry options with defaults."""
-        control_interval = self._coerce_int(
-            options.get(CONF_CONTROL_INTERVAL_MINUTES, DEFAULT_CONTROL_INTERVAL_MINUTES),
-            DEFAULT_CONTROL_INTERVAL_MINUTES,
-            minimum=1,
-        )
-        prediction_horizon = self._coerce_int(
-            options.get(CONF_PREDICTION_HORIZON_HOURS, DEFAULT_PREDICTION_HORIZON_HOURS),
-            DEFAULT_PREDICTION_HORIZON_HOURS,
-            minimum=1,
-        )
-        heating_hysteresis = self._state_to_float(options.get(CONF_HEATING_SUPPLY_TEMP_HYSTERESIS))
-        if heating_hysteresis is None:
-            heating_hysteresis = DEFAULT_HEATING_SUPPLY_TEMP_HYSTERESIS
-
-        target_temperature = self._state_to_float(options.get(CONF_TARGET_TEMPERATURE))
-        if target_temperature is None:
-            target_temperature = DEFAULT_TARGET_TEMPERATURE
-
-        price_comfort_weight = self._state_to_float(options.get(CONF_PRICE_COMFORT_WEIGHT))
-        if price_comfort_weight is None:
-            price_comfort_weight = DEFAULT_PRICE_COMFORT_WEIGHT
-        price_comfort_weight = min(1.0, max(0.0, float(price_comfort_weight)))
-
-        price_penalty_curve = options.get(CONF_PRICE_PENALTY_CURVE, DEFAULT_PRICE_PENALTY_CURVE)
-        if price_penalty_curve not in PRICE_PENALTY_CURVES:
-            price_penalty_curve = DEFAULT_PRICE_PENALTY_CURVE
-
-        price_baseline_window = options.get(
-            CONF_PRICE_BASELINE_WINDOW_HOURS, DEFAULT_PRICE_BASELINE_WINDOW_HOURS
-        )
-        try:
-            price_baseline_window = int(price_baseline_window)
-        except (TypeError, ValueError):
-            price_baseline_window = DEFAULT_PRICE_BASELINE_WINDOW_HOURS
-        if price_baseline_window not in PRICE_BASELINE_WINDOW_OPTIONS:
-            price_baseline_window = DEFAULT_PRICE_BASELINE_WINDOW_HOURS
-
-        absolute_low_window_raw = options.get(
-            CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS, DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS
-        )
-        absolute_low_window_days = self._coerce_int(
-            absolute_low_window_raw, DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS, minimum=1
-        )
-        if absolute_low_window_days not in PRICE_ABSOLUTE_LOW_WINDOW_DAYS_OPTIONS:
-            absolute_low_window_days = DEFAULT_PRICE_ABSOLUTE_LOW_WINDOW_DAYS
-
-        absolute_low_raw = options.get(
-            CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
-        )
-        absolute_low_threshold: float | str | None
-        if absolute_low_raw is None:
-            absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
-        elif isinstance(absolute_low_raw, str):
-            absolute_low_str = absolute_low_raw.strip().lower()
-            if absolute_low_str == PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO:
-                absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
-            elif absolute_low_str == PRICE_ABSOLUTE_LOW_THRESHOLD_OFF:
-                absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_OFF
-            else:
-                try:
-                    absolute_low_value = float(absolute_low_str)
-                except (TypeError, ValueError):
-                    absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
-                else:
-                    absolute_low_threshold = (
-                        absolute_low_value if absolute_low_value > 0 else PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
-                    )
-        else:
-            try:
-                absolute_low_value = float(absolute_low_raw)
-            except (TypeError, ValueError):
-                absolute_low_threshold = PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
-            else:
-                absolute_low_threshold = (
-                    absolute_low_value if absolute_low_value > 0 else PRICE_ABSOLUTE_LOW_THRESHOLD_AUTO
-                )
-
-        continuous_enabled = bool(
-            options.get(CONF_CONTINUOUS_CONTROL_ENABLED, DEFAULT_CONTINUOUS_CONTROL_ENABLED)
-        )
-        continuous_window_raw = options.get(
-            CONF_CONTINUOUS_CONTROL_WINDOW_HOURS, DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
-        )
-        try:
-            continuous_window = float(continuous_window_raw)
-        except (TypeError, ValueError):
-            continuous_window = DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS
-        if int(continuous_window) not in CONTINUOUS_CONTROL_WINDOW_OPTIONS:
-            continuous_window = float(DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS)
-
-        comfort_tolerance = self._state_to_float(options.get(CONF_COMFORT_TEMPERATURE_TOLERANCE))
-        if comfort_tolerance is None:
-            comfort_tolerance = DEFAULT_COMFORT_TEMPERATURE_TOLERANCE
-
-        overshoot_enabled = bool(options.get(CONF_OVERSHOOT_WARM_BIAS_ENABLED, DEFAULT_OVERSHOOT_WARM_BIAS_ENABLED))
-        overshoot_curve = options.get(CONF_OVERSHOOT_WARM_BIAS_CURVE, DEFAULT_OVERSHOOT_WARM_BIAS_CURVE)
-        if overshoot_curve not in OVERSHOOT_WARM_BIAS_CURVES:
-            overshoot_curve = DEFAULT_OVERSHOOT_WARM_BIAS_CURVE
-        overshoot_hysteresis_enabled = bool(
-            options.get(
-                CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-                DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED,
-            )
-        )
-        overshoot_hysteresis = self._state_to_float(options.get(CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS))
-        if overshoot_hysteresis is None:
-            overshoot_hysteresis = DEFAULT_OVERSHOOT_WARM_BIAS_HYSTERESIS
-        overshoot_hysteresis = max(0.0, float(overshoot_hysteresis))
-
-        smoothing_enabled = bool(
-            options.get(
-                CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-                DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED,
-            )
-        )
-        smoothing_alpha = self._state_to_float(options.get(CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA))
-        if smoothing_alpha is None:
-            smoothing_alpha = DEFAULT_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA
-        smoothing_alpha = min(1.0, max(0.0, float(smoothing_alpha)))
-
-        learning_on_margin = self._state_to_float(options.get(CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN))
-        if learning_on_margin is None:
-            learning_on_margin = DEFAULT_LEARNING_SUPPLY_TEMP_ON_MARGIN
-        learning_on_margin = max(0.0, float(learning_on_margin))
-
-        learning_off_margin = self._state_to_float(options.get(CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN))
-        if learning_off_margin is None:
-            learning_off_margin = DEFAULT_LEARNING_SUPPLY_TEMP_OFF_MARGIN
-        learning_off_margin = max(0.0, float(learning_off_margin))
-        performance_window_raw = options.get(CONF_PERFORMANCE_WINDOW_HOURS, DEFAULT_PERFORMANCE_WINDOW_HOURS)
-        try:
-            performance_window = int(performance_window_raw)
-        except (TypeError, ValueError):
-            performance_window = DEFAULT_PERFORMANCE_WINDOW_HOURS
-        if performance_window not in PERFORMANCE_WINDOW_OPTIONS:
-            performance_window = DEFAULT_PERFORMANCE_WINDOW_HOURS
-        learning_window_raw = options.get(CONF_LEARNING_WINDOW_HOURS, DEFAULT_LEARNING_WINDOW_HOURS)
-        try:
-            learning_window = int(learning_window_raw)
-        except (TypeError, ValueError):
-            learning_window = DEFAULT_LEARNING_WINDOW_HOURS
-        if learning_window not in LEARNING_WINDOW_OPTIONS:
-            learning_window = DEFAULT_LEARNING_WINDOW_HOURS
-        learning_model = options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL)
-        if learning_model not in (LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
-            learning_model = DEFAULT_LEARNING_MODEL
-        rls_factor = self._state_to_float(options.get(CONF_RLS_FORGETTING_FACTOR))
-        if rls_factor is None:
-            rls_factor = DEFAULT_RLS_FORGETTING_FACTOR
-        rls_factor = min(1.0, max(0.9, float(rls_factor)))
-        merged = {
-            CONF_TARGET_TEMPERATURE: target_temperature,
-            CONF_PRICE_COMFORT_WEIGHT: price_comfort_weight,
-            CONF_PRICE_PENALTY_CURVE: price_penalty_curve,
-            CONF_PRICE_BASELINE_WINDOW_HOURS: price_baseline_window,
-            CONF_PRICE_ABSOLUTE_LOW_THRESHOLD: absolute_low_threshold,
-            CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: absolute_low_window_days,
-            CONF_CONTINUOUS_CONTROL_ENABLED: continuous_enabled,
-            CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: continuous_window,
-            CONF_CONTROL_INTERVAL_MINUTES: control_interval,
-            CONF_PREDICTION_HORIZON_HOURS: prediction_horizon,
-            CONF_COMFORT_TEMPERATURE_TOLERANCE: comfort_tolerance,
-            CONF_MONITOR_ONLY: options.get(CONF_MONITOR_ONLY, DEFAULT_MONITOR_ONLY),
-            CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET: options.get(
-                CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET, DEFAULT_VIRTUAL_OUTDOOR_HEAT_OFFSET
-            ),
-            CONF_VIRTUAL_OUTDOOR_MIN_TEMP: options.get(
-                CONF_VIRTUAL_OUTDOOR_MIN_TEMP, DEFAULT_VIRTUAL_OUTDOOR_MIN_TEMP
-            ),
-            CONF_OVERSHOOT_WARM_BIAS_ENABLED: overshoot_enabled,
-            CONF_OVERSHOOT_WARM_BIAS_CURVE: overshoot_curve,
-            CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS_ENABLED: overshoot_hysteresis_enabled,
-            CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS: overshoot_hysteresis,
-            CONF_HEAT_LOSS_COEFFICIENT: options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT),
-            CONF_THERMAL_RESPONSE_SEED: options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
-            CONF_LEARNING_MODEL: learning_model,
-            CONF_RLS_FORGETTING_FACTOR: rls_factor,
-            CONF_LEARNING_WINDOW_HOURS: learning_window,
-            CONF_PERFORMANCE_WINDOW_HOURS: performance_window,
-            CONF_HEATING_SUPPLY_TEMP_ENTITY: options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY),
-            CONF_HEATING_SUPPLY_TEMP_THRESHOLD: options.get(
-                CONF_HEATING_SUPPLY_TEMP_THRESHOLD, DEFAULT_HEATING_SUPPLY_TEMP_THRESHOLD
-            ),
-            CONF_HEATING_DETECTION_ENABLED: bool(
-                options.get(CONF_HEATING_DETECTION_ENABLED, DEFAULT_HEATING_DETECTION_ENABLED)
-            ),
-            CONF_HEATING_SUPPLY_TEMP_HYSTERESIS: heating_hysteresis,
-            CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS: self._coerce_int(
-                options.get(CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS, DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS),
-                DEFAULT_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
-                minimum=0,
-            ),
-            CONF_LEARNING_SUPPLY_TEMP_ON_MARGIN: learning_on_margin,
-            CONF_LEARNING_SUPPLY_TEMP_OFF_MARGIN: learning_off_margin,
-            CONF_INITIAL_INDOOR_TEMP: options.get(CONF_INITIAL_INDOOR_TEMP),
-            CONF_INITIAL_HEAT_GAIN: options.get(CONF_INITIAL_HEAT_GAIN),
-            CONF_INITIAL_HEAT_LOSS_OVERRIDE: options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE),
-            CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED: bool(
-                options.get(CONF_VIRTUAL_OUTDOOR_TRACE_ENABLED, DEFAULT_VIRTUAL_OUTDOOR_TRACE_ENABLED)
-            ),
-            CONF_VIRTUAL_OUTDOOR_SMOOTHING_ENABLED: smoothing_enabled,
-            CONF_VIRTUAL_OUTDOOR_SMOOTHING_ALPHA: smoothing_alpha,
-        }
-        return merged
-
-    def _build_thermal_model(self, options: dict[str, Any]) -> ThermalModelEstimator | ThermalModelRlsEstimator:
-        """Create a thermal model estimator based on options."""
-        base_loss = options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT)
-        initial_heat_loss = options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE, base_loss)
-        if initial_heat_loss is None:
-            initial_heat_loss = base_loss
-        learning_model = options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL)
-        if learning_model not in (LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
-            learning_model = DEFAULT_LEARNING_MODEL
-        rls_factor = self._state_to_float(options.get(CONF_RLS_FORGETTING_FACTOR))
-        if rls_factor is None:
-            rls_factor = DEFAULT_RLS_FORGETTING_FACTOR
-        rls_factor = min(1.0, max(0.9, float(rls_factor)))
-        if learning_model == LEARNING_MODEL_RLS:
-            return ThermalModelRlsEstimator(
-                seed=options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
-                initial_heat_loss=initial_heat_loss,
-                initial_heat_gain=options.get(CONF_INITIAL_HEAT_GAIN),
-                initial_temp=options.get(CONF_INITIAL_INDOOR_TEMP),
-                forgetting_factor=rls_factor,
-            )
-        return ThermalModelEstimator(
-            seed=options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
-            initial_heat_loss=initial_heat_loss,
-            initial_heat_gain=options.get(CONF_INITIAL_HEAT_GAIN),
-            initial_temp=options.get(CONF_INITIAL_INDOOR_TEMP),
-        )
-
-    @staticmethod
-    def _coerce_int(value: Any, default: int, minimum: int | None = None) -> int:
-        """Convert value to an int with optional minimum clamp."""
-        try:
-            numeric = int(round(float(value)))
-        except (TypeError, ValueError):
-            numeric = default
-        if minimum is not None:
-            numeric = max(minimum, numeric)
-        return numeric
-
     def _publish_decision(self) -> None:
         """Publish the latest decision for diagnostics sensors."""
         now = dt_util.utcnow()
@@ -2268,6 +1688,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         learning_state, learning_details = self._compute_learning_state(now)
         curve_recommendation, curve_details = self._compute_curve_recommendation(now)
         heating_detected = self._get_heating_detected(now)
+        heating_gap = summarize_heating_detection_gap(
+            effective_requested_duty_ratio=self._last_effective_requested_duty_ratio,
+            heating_detected=heating_detected,
+        )
         overshoot_bias, overshoot_warm_bias_multiplier, overshoot_min_bias, overshoot_max_bias = (
             self._comfort_overshoot_multiplier()
         )
@@ -2330,7 +1754,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             "suggested_heat_on": self._last_control_on,
             "suggested_virtual_outdoor_temperature": suggested_virtual_outdoor_temperature,
             "suggested_virtual_outdoor_temperature_raw": self._last_virtual_outdoor_raw,
-            "planned_virtual_outdoor_temperatures": self._trim_series(
+            "raw_mpc_sequence_head": list(self._last_raw_mpc_sequence_head),
+            "planned_virtual_outdoor_temperatures": ForecastService.trim_series(
                 planned_virtual_outdoor, DECISION_SERIES_MAX_ENTRIES
             ),
             "target_temperature": self._target_temperature,
@@ -2385,66 +1810,69 @@ class MpcHeatPumpClimate(ClimateEntity):
             "continuous_control_enabled": self._continuous_control_enabled,
             "continuous_control_window_hours": self._continuous_control_window_hours,
             "continuous_control_duty_ratio": self._last_duty_ratio,
+            "raw_requested_duty_ratio": self._last_raw_requested_duty_ratio,
+            "effective_requested_duty_ratio": self._last_effective_requested_duty_ratio,
+            "effective_heat_request_state": self._last_effective_heat_request_state,
+            "anti_chatter_limited": self._last_anti_chatter_limited,
+            "anti_chatter_reason": self._last_anti_chatter_reason,
             "continuous_control_virtual_outdoor_shift": self._last_virtual_outdoor_shift,
             "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
             "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
             "cost": self._last_result.cost if self._last_result else None,
-            "predicted_temperatures": self._trim_series(
+            "predicted_temperatures": ForecastService.trim_series(
                 self._last_result.predicted_temperatures if self._last_result else None,
                 DECISION_SERIES_MAX_ENTRIES,
             ),
-            "price_forecast": self._trim_series(self._last_price_forecast, DECISION_SERIES_MAX_ENTRIES),
-            "outdoor_forecast": self._trim_series(self._last_outdoor_forecast, DECISION_SERIES_MAX_ENTRIES),
-            "price_history": self._trim_series(self._price_history, DECISION_SERIES_MAX_ENTRIES),
+            "price_forecast": ForecastService.trim_series(self._last_price_forecast, DECISION_SERIES_MAX_ENTRIES),
+            "outdoor_forecast": ForecastService.trim_series(self._last_outdoor_forecast, DECISION_SERIES_MAX_ENTRIES),
+            "price_history": ForecastService.trim_series(self._price_history, DECISION_SERIES_MAX_ENTRIES),
             "price_history_samples": len(self._price_history),
             "price_history_source": self._price_history_source,
+            **heating_gap,
         }
-        entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(self.config_entry.entry_id, {})
-        entry_data["last_decision"] = payload
-        entry_data["performance"] = self._compute_performance_summary(now)
-        if not self._virtual_outdoor_trace_enabled:
-            async_dispatcher_send(
-                self.hass, f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}"
-            )
-            return
-        trace_timestamp = (self._last_control_time or now).isoformat(timespec="milliseconds")
-        trace_entry = {
-            "time": trace_timestamp,
-            "base_outdoor": float(base_outdoor_fallback),
-            "base_source": base_outdoor_source,
-            "virtual_outdoor": suggested_virtual_outdoor_temperature,
-            "virtual_outdoor_raw": self._last_virtual_outdoor_raw,
-            "virtual_outdoor_shift": self._last_virtual_outdoor_shift,
-            "duty_ratio": self._last_duty_ratio,
-            "continuous_control_enabled": self._continuous_control_enabled,
-            "virtual_outdoor_heat_offset": self._virtual_heat_offset,
-            "virtual_outdoor_min_temp": self._virtual_outdoor_min_temp,
-            "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
-            "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
-            "overshoot_warm_bias_applied": overshoot_bias,
-            "heat_on": self._last_control_on,
-            "indoor_temperature": self._indoor_temp,
-            "target_temperature": self._target_temperature,
-            "price_ratio": price_ratio_mpc,
-            "price_classification": price_classification_mpc,
-            "current_price": current_price,
-            "price_baseline": self._last_result.price_baseline if self._last_result else None,
-        }
-        trace = entry_data.setdefault("virtual_outdoor_trace", [])
-
-        def _strip_time(entry: dict[str, Any]) -> dict[str, Any]:
-            return {key: value for key, value in entry.items() if key != "time"}
-
-        if trace and (
-            trace[-1].get("time") == trace_timestamp
-            or _strip_time(trace[-1]) == _strip_time(trace_entry)
-        ):
-            trace[-1] = trace_entry
-        else:
-            trace.append(trace_entry)
-            if len(trace) > VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES:
-                del trace[: len(trace) - VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES]
-        async_dispatcher_send(self.hass, f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}")
+        trace_entry = None
+        if self._virtual_outdoor_trace_enabled:
+            trace_timestamp = (self._last_control_time or now).isoformat(timespec="milliseconds")
+            trace_entry = {
+                "time": trace_timestamp,
+                "base_outdoor": float(base_outdoor_fallback),
+                "base_source": base_outdoor_source,
+                "virtual_outdoor": suggested_virtual_outdoor_temperature,
+                "virtual_outdoor_raw": self._last_virtual_outdoor_raw,
+                "virtual_outdoor_shift": self._last_virtual_outdoor_shift,
+                "duty_ratio": self._last_duty_ratio,
+                "raw_requested_duty_ratio": self._last_raw_requested_duty_ratio,
+                "effective_requested_duty_ratio": self._last_effective_requested_duty_ratio,
+                "effective_heat_request_state": self._last_effective_heat_request_state,
+                "raw_mpc_sequence_head": list(self._last_raw_mpc_sequence_head),
+                "anti_chatter_limited": self._last_anti_chatter_limited,
+                "anti_chatter_reason": self._last_anti_chatter_reason,
+                "continuous_control_enabled": self._continuous_control_enabled,
+                "virtual_outdoor_heat_offset": self._virtual_heat_offset,
+                "virtual_outdoor_min_temp": self._virtual_outdoor_min_temp,
+                "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
+                "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
+                "overshoot_warm_bias_applied": overshoot_bias,
+                "heat_on": self._last_control_on,
+                "indoor_temperature": self._indoor_temp,
+                "target_temperature": self._target_temperature,
+                "price_ratio": price_ratio_mpc,
+                "price_classification": price_classification_mpc,
+                "current_price": current_price,
+                "price_baseline": self._last_result.price_baseline if self._last_result else None,
+                **heating_gap,
+            }
+        publish_entry_diagnostics(
+            self.hass,
+            domain=DOMAIN,
+            entry_id=self.config_entry.entry_id,
+            signal=f"{SIGNAL_DECISION_UPDATED}_{self.config_entry.entry_id}",
+            payload=payload,
+            performance=self._compute_performance_summary(now),
+            trace_enabled=self._virtual_outdoor_trace_enabled,
+            trace_entry=trace_entry,
+            trace_max_entries=VIRTUAL_OUTDOOR_TRACE_MAX_ENTRIES,
+        )
 
     def _comfort_overshoot_multiplier(self) -> tuple[float, float, float, float]:
         """Return (bias, multiplier, min_bias, max_bias) for above-target comfort penalty."""
@@ -2888,6 +2316,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         if self._heating_detection_active():
             return "heating_supply_temp_threshold"
         if not self._monitor_only:
+            if not self._controlled_entity:
+                return "none"
             return "mpc_applied_decision"
         entity_id = self._controlled_entity
         if not entity_id:
@@ -2935,6 +2365,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         price: float | None,
         prediction_error: float | None,
         suggested_heat_on: bool | None,
+        requested_duty_ratio: float | None = None,
     ) -> None:
         """Store a performance sample for scoring."""
         try:
@@ -2946,6 +2377,12 @@ class MpcHeatPumpClimate(ClimateEntity):
             target = float(target_temp)
         except (TypeError, ValueError):
             return
+        duty_ratio_value = None
+        if requested_duty_ratio is not None:
+            try:
+                duty_ratio_value = max(0.0, min(1.0, float(requested_duty_ratio)))
+            except (TypeError, ValueError):
+                duty_ratio_value = None
         sample = PerformanceSample(
             when=when,
             indoor_temp=indoor,
@@ -2954,6 +2391,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             price=price,
             prediction_error=prediction_error,
             suggested_heat_on=suggested_heat_on,
+            requested_duty_ratio=duty_ratio_value,
         )
         self._performance_history.append(sample)
         if len(self._performance_history) > PERFORMANCE_HISTORY_MAX_ENTRIES:
@@ -3000,6 +2438,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             min_samples=CURVE_RECOMMENDATION_MIN_SAMPLES,
             idle_ratio_threshold=CURVE_IDLE_HEATING_HIGH_RATIO,
             active_ratio_threshold=CURVE_ACTIVE_HEATING_LOW_RATIO,
+            idle_request_threshold=CURVE_IDLE_REQUEST_THRESHOLD,
         )
         details["window_hours"] = window_hours
         return recommendation, details

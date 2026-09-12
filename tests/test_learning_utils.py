@@ -17,6 +17,7 @@ from const import (  # noqa: E402
     CONF_HEATING_SUPPLY_TEMP_DEBOUNCE_SECONDS,
     CONF_HEATING_SUPPLY_TEMP_HYSTERESIS,
     CONF_HEATING_SUPPLY_TEMP_THRESHOLD,
+    CONF_INITIAL_INDOOR_TEMP,
     CONF_INITIAL_HEAT_LOSS_OVERRIDE,
     CONF_LEARNING_MODEL,
     CONF_LEARNING_WINDOW_HOURS,
@@ -25,7 +26,7 @@ from const import (  # noqa: E402
     LEARNING_MODEL_EKF,
     LEARNING_MODEL_RLS,
 )
-from learning_utils import should_reseed_thermal_model  # noqa: E402
+from learning_utils import resolve_estimator_initial_temp, should_reseed_thermal_model  # noqa: E402
 
 
 def test_should_reseed_false_for_unrelated_option_changes() -> None:
@@ -69,3 +70,18 @@ def test_should_reseed_true_for_estimator_initialization_changes(key: str, value
     current = dict(previous)
     current[key] = value
     assert should_reseed_thermal_model(previous, current) is True
+
+
+def test_resolve_estimator_initial_temp_prefers_configured_override() -> None:
+    options = {CONF_INITIAL_HEAT_LOSS_OVERRIDE: 0.03, CONF_INITIAL_INDOOR_TEMP: 19.5}
+    assert resolve_estimator_initial_temp(options, 21.0) == pytest.approx(19.5)
+
+
+def test_resolve_estimator_initial_temp_falls_back_to_current_measurement() -> None:
+    options = {CONF_INITIAL_HEAT_LOSS_OVERRIDE: 0.03, CONF_INITIAL_INDOOR_TEMP: None}
+    assert resolve_estimator_initial_temp(options, 21.0) == pytest.approx(21.0)
+
+
+def test_resolve_estimator_initial_temp_returns_none_without_valid_input() -> None:
+    options = {CONF_INITIAL_INDOOR_TEMP: None}
+    assert resolve_estimator_initial_temp(options, "unknown") is None
