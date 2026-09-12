@@ -2,3 +2,10 @@ __pycache__/
 tests/__pycache__/
 .pytest_cache/
 .venv/
+
+# Local Home Assistant exports and generated learning-analysis results.
+/data/
+
+# Local reference checkout and archived integration snapshot.
+/Others/
+/custom_components/heat_pump_pilot/old/
