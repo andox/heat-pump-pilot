@@ -43,6 +43,15 @@ def _pad_to_length(values: list[float], length: int, fallback: float) -> list[fl
     return values[:length]
 
 
+def resolve_virtual_heat_offset(default_offset: float, override_offset: float | None = None) -> float:
+    """Return the non-negative heat offset to use for a heat request."""
+    source = default_offset if override_offset is None else override_offset
+    try:
+        return max(0.0, float(source))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def compute_planned_virtual_outdoor_temperatures(
     sequence: Sequence[bool] | None,
     outdoor_forecast: Sequence[float] | None,
@@ -239,6 +248,10 @@ def compute_continuous_virtual_outdoor(
         return min(float(base_outdoor), max_virtual_outdoor)
 
     ratio = max(0.0, min(1.0, float(duty_ratio)))
+    # Intentional: duty_ratio encodes planned heating intensity over the window,
+    # not the binary first-step decision. ratio=1 => full cold (max heat drive),
+    # ratio=0 => full warm (max back-off), ratio=0.5 => neutral. A low duty ratio
+    # correctly backs off the pump even when step 0 of the MPC sequence is heat=True.
     base_shift = offset * (1.0 - 2.0 * ratio)
     value = float(base_outdoor) + base_shift
 

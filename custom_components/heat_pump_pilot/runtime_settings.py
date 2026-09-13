@@ -12,6 +12,19 @@ from typing import Any
 try:
     from .config_helpers import normalize_hvac_mode
     from .const import (
+    CONF_SUMMER_HEAT_WINDOW_ENABLED,
+    CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
+    CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+    CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+    CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+    CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+    DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
+    DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
+    DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+    DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+    DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+    DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+
         CONF_COMFORT_TEMPERATURE_TOLERANCE,
         CONF_CONTINUOUS_CONTROL_ENABLED,
         CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
@@ -99,7 +112,20 @@ try:
     from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator
 except ImportError:  # pragma: no cover - direct test imports
     from config_helpers import normalize_hvac_mode  # type: ignore
-    from const import (  # type: ignore
+    from const import (
+    CONF_SUMMER_HEAT_WINDOW_ENABLED,
+    CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
+    CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+    CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+    CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+    CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+    DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
+    DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
+    DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+    DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+    DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+    DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+  # type: ignore
         CONF_COMFORT_TEMPERATURE_TOLERANCE,
         CONF_CONTINUOUS_CONTROL_ENABLED,
         CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
@@ -221,6 +247,12 @@ class ClimateRuntimeSettings:
     price_absolute_low_window_days: int
     continuous_control_enabled: bool
     continuous_control_window_hours: float
+    summer_heat_window_enabled: bool
+    summer_heat_window_max_price: float
+    summer_heat_window_duration_minutes: int
+    summer_heat_window_demand_window_hours: int
+    summer_heat_window_max_heat_demand_ratio: float
+    summer_heat_window_virtual_heat_offset: float
     control_interval_minutes: int
     prediction_horizon_hours: int
     comfort_temperature_tolerance: float
@@ -255,6 +287,42 @@ class ClimateRuntimeSettings:
 
 def merge_climate_options(options: dict[str, Any]) -> dict[str, Any]:
     """Merge entry options with runtime defaults."""
+    summer_heat_window_enabled = bool(
+        options.get(CONF_SUMMER_HEAT_WINDOW_ENABLED, DEFAULT_SUMMER_HEAT_WINDOW_ENABLED)
+    )
+    summer_heat_window_max_price = _coerce_float(options.get(CONF_SUMMER_HEAT_WINDOW_MAX_PRICE))
+    if summer_heat_window_max_price is None:
+        summer_heat_window_max_price = DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE
+    summer_heat_window_max_price = max(0.0, float(summer_heat_window_max_price))
+    summer_heat_window_duration = _coerce_int(
+        options.get(CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES, DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES),
+        DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+        minimum=1,
+    )
+    summer_heat_window_demand_window = _coerce_int(
+        options.get(
+            CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+            DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+        ),
+        DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+        minimum=1,
+    )
+    summer_heat_window_max_demand = _coerce_float(
+        options.get(CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO)
+    )
+    if summer_heat_window_max_demand is None:
+        summer_heat_window_max_demand = DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO
+    summer_heat_window_max_demand = min(1.0, max(0.0, float(summer_heat_window_max_demand)))
+    summer_heat_window_virtual_heat_offset = _coerce_float(
+        options.get(
+            CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+            options.get(CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET, DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET),
+        )
+    )
+    if summer_heat_window_virtual_heat_offset is None:
+        summer_heat_window_virtual_heat_offset = DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET
+    summer_heat_window_virtual_heat_offset = max(0.0, float(summer_heat_window_virtual_heat_offset))
+
     control_interval = _coerce_int(
         options.get(CONF_CONTROL_INTERVAL_MINUTES, DEFAULT_CONTROL_INTERVAL_MINUTES),
         DEFAULT_CONTROL_INTERVAL_MINUTES,
@@ -419,6 +487,12 @@ def merge_climate_options(options: dict[str, Any]) -> dict[str, Any]:
         CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS: absolute_low_window_days,
         CONF_CONTINUOUS_CONTROL_ENABLED: continuous_enabled,
         CONF_CONTINUOUS_CONTROL_WINDOW_HOURS: continuous_window,
+        CONF_SUMMER_HEAT_WINDOW_ENABLED: summer_heat_window_enabled,
+        CONF_SUMMER_HEAT_WINDOW_MAX_PRICE: summer_heat_window_max_price,
+        CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES: summer_heat_window_duration,
+        CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS: summer_heat_window_demand_window,
+        CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO: summer_heat_window_max_demand,
+        CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET: summer_heat_window_virtual_heat_offset,
         CONF_CONTROL_INTERVAL_MINUTES: control_interval,
         CONF_PREDICTION_HORIZON_HOURS: prediction_horizon,
         CONF_COMFORT_TEMPERATURE_TOLERANCE: comfort_tolerance,
@@ -478,6 +552,12 @@ def build_runtime_settings(options: dict[str, Any]) -> ClimateRuntimeSettings:
         price_absolute_low_window_days=normalized[CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS],
         continuous_control_enabled=normalized[CONF_CONTINUOUS_CONTROL_ENABLED],
         continuous_control_window_hours=normalized[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS],
+        summer_heat_window_enabled=normalized[CONF_SUMMER_HEAT_WINDOW_ENABLED],
+        summer_heat_window_max_price=normalized[CONF_SUMMER_HEAT_WINDOW_MAX_PRICE],
+        summer_heat_window_duration_minutes=normalized[CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES],
+        summer_heat_window_demand_window_hours=normalized[CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS],
+        summer_heat_window_max_heat_demand_ratio=normalized[CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO],
+        summer_heat_window_virtual_heat_offset=normalized[CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET],
         control_interval_minutes=normalized[CONF_CONTROL_INTERVAL_MINUTES],
         prediction_horizon_hours=normalized[CONF_PREDICTION_HORIZON_HOURS],
         comfort_temperature_tolerance=normalized[CONF_COMFORT_TEMPERATURE_TOLERANCE],

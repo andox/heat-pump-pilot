@@ -68,20 +68,33 @@ recommended values when you’re unsure. Values are in the UI unless noted.
 
 Core control:
 - Target temperature (default: 21.0°C): your comfort setpoint; set to your normal desired indoor temp.
-- Price vs comfort weight (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.4-0.6.
+- Price priority (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.4-0.6.
 - Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
 - Price baseline window (default: 24 h): how much recent observed history is used alongside forecasts when scaling prices (24/48/72 h).
 - Absolute low-price threshold (default: auto): cap classification at `normal` when the current price is below the threshold (`auto` = median of recent history, `off` disables the cap).
 - Absolute low-price auto window (default: 30 d): window used for the `auto` threshold (7/14/30 days).
 - Continuous control enabled (default: true): smooths virtual outdoor temperature using MPC duty ratio.
 - Continuous control window (default: 2 h): horizon used to compute the duty ratio (1–4 h).
+- Summer low-price heat window (default: off): optionally schedules one daily
+  continuous heat window during low-demand periods when every price sample in
+  the window is at or below the configured absolute max price.
+- Summer heat window max price (default: 0.30): absolute price cap for the
+  whole summer heat window.
+- Summer heat window duration (default: 60 min): required continuous duration;
+  the run is never split across multiple low-price periods.
+- Summer heat demand history window/max recent demand ratio (default: 48 h / 10%): automatic
+  season gate based on recent normal MPC heat-request ratio, without calendar
+  dates.
+- Summer heat virtual outdoor offset (default: same as normal virtual
+  outdoor heat offset): virtual outdoor reduction used only when the summer
+  window overrides idle.
 - Control interval (default: 15 min): how often MPC runs; keep 15-30 min unless you have slow sensors.
 - Prediction horizon (default: 24 h): MPC planning horizon; 12-24 h is typical.
 - Comfort tolerance (default: 1.0°C): deadband before comfort penalty; 0.5-1.5°C is typical.
 - Monitor only (default: false): true to disable control actions.
 
 Virtual outdoor control:
-- Virtual outdoor swing range (default: 10.0°C): max shift colder when heating and warmer when backing off; start at 6–12°C.
+- Virtual outdoor heat offset (default: 10.0°C): max shift colder when heating and warmer when backing off; start at 6–12°C.
 - Virtual outdoor minimum (default: -15.0°C): never send a lower virtual outdoor temperature unless the actual outdoor temperature is already below this.
 - Overshoot warm bias enabled (default: true): warm bias when predicted above target; also boosts MPC comfort penalty when above target.
 - Overshoot warm bias curve (default: linear): shape of the back-off ramp; options are linear, quadratic, cubic, sqrt.
@@ -117,19 +130,19 @@ Performance metrics:
 These are starting points; adjust after 1–2 days of data.
 
 Comfort‑first:
-- Price vs comfort weight: 0.70
+- Price priority: 0.30
 - Price penalty curve: sqrt
 - Comfort tolerance: 0.5–1.0°C
 - Virtual outdoor heat offset: 3–6°C
 
 Balanced:
-- Price vs comfort weight: 0.85
+- Price priority: 0.50
 - Price penalty curve: linear
 - Comfort tolerance: 0.8–1.2°C
 - Virtual outdoor heat offset: 4–8°C
 
 Price‑first:
-- Price vs comfort weight: 0.95
+- Price priority: 0.70
 - Price penalty curve: quadratic
 - Comfort tolerance: 1.0–1.5°C
 - Virtual outdoor heat offset: 6–10°C
@@ -162,6 +175,34 @@ indoor temperature exceeds `comfort_tolerance + hysteresis`, and it stays active
 until the temperature drops below `comfort_tolerance - hysteresis`.
 When virtual outdoor smoothing is enabled, the output is EMA-smoothed between
 control runs; use a lower alpha for smoother, slower changes.
+
+### Summer low-price heat window
+The optional summer heat window is intended for periods where normal space
+heating demand is already low, but you still want one low-price daily heat pulse to
+put warmth into a hydronic floor. It does not use calendar dates. Instead, it
+checks the recent normal MPC heat-request ratio; with the default settings it is
+eligible only when the last 48 hours requested heat no more than 10% of the
+time.
+
+When eligible, the controller searches the remaining local day for one
+continuous price block where every sample is at or below the configured max
+price. The block must cover the configured duration, defaults to 60 minutes,
+and if several blocks qualify the cheapest average block is selected. If no
+qualifying continuous block exists in the currently available price forecast,
+the feature reports `skipped` but re-checks on later control runs. This handles
+Nordpool-style next-day prices arriving later in the day. It never splits one
+daily run across multiple sessions, and once a window has started or completed
+it will not schedule another run for the same local day.
+
+During the selected window, normal MPC still runs first. If the MPC already
+requests heat, the window is counted without adding another behaviour. If the
+MPC is idle, the summer window overrides idle by lowering the virtual outdoor
+temperature using the dedicated **Summer heat virtual outdoor offset**,
+which requests more heat from the heat pump. This lets the summer heat pulse use
+a stronger trigger than normal MPC heating if the pump needs a colder virtual
+outdoor value to start floor heating. The result is still constrained by the
+global virtual outdoor minimum. In monitor-only mode, the schedule and
+diagnostics are still computed, but no control service is called.
 
 ### Creating an outdoor temperature sensor from a weather entity
 If you only have a `weather.*` entity, create a template sensor:
@@ -265,8 +306,10 @@ The integration stores its state in `.storage`:
 - `heat_pump_pilot_<entry_id>_thermal.json` (learning model + history)
 - `heat_pump_pilot_<entry_id>_prices.json` (price history, up to ~30 days)
 - `heat_pump_pilot_<entry_id>_performance.json` (performance samples)
+- `heat_pump_pilot_<entry_id>_summer_heat_window.json` (selected daily heat window)
 
-This means learning, price baselines, and performance scores survive restarts.
+This means learning, price baselines, performance scores, and the selected daily
+summer heat window survive restarts.
 
 ## Sensors and diagnostics
 Key diagnostic sensors:

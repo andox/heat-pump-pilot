@@ -58,6 +58,12 @@ from .const import (
     CONF_PRICE_ABSOLUTE_LOW_WINDOW_DAYS,
     CONF_CONTINUOUS_CONTROL_ENABLED,
     CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
+    CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+    CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+    CONF_SUMMER_HEAT_WINDOW_ENABLED,
+    CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+    CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
+    CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
     CONF_TARGET_TEMPERATURE,
     CONF_THERMAL_RESPONSE_SEED,
     CONF_VIRTUAL_OUTDOOR_HEAT_OFFSET,
@@ -101,6 +107,12 @@ from .const import (
     PRICE_ABSOLUTE_LOW_WINDOW_DAYS_OPTIONS,
     DEFAULT_CONTINUOUS_CONTROL_ENABLED,
     DEFAULT_CONTINUOUS_CONTROL_WINDOW_HOURS,
+    DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+    DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+    DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
+    DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+    DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
+    DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
     DEFAULT_RLS_FORGETTING_FACTOR,
     DEFAULT_TARGET_TEMPERATURE,
     DEFAULT_THERMAL_RESPONSE_SEED,
@@ -129,7 +141,7 @@ from .control_request_utils import (
     resolve_effective_heat_request,
     summarize_heating_detection_gap,
 )
-from .forecast_utils import expand_to_steps
+from .forecast_utils import TimedValue, expand_to_steps
 from .learning_utils import resolve_estimator_initial_temp, should_reseed_thermal_model
 from .mpc_controller import MpcController, ControlResult
 from .notification_utils import NotificationTracker, NotificationUpdate
@@ -151,11 +163,25 @@ from .price_utils import (
 )
 from .runtime_settings import build_runtime_settings, build_thermal_model_from_options, merge_climate_options
 from .thermal_model import ThermalModelStorage
+from .summer_heat_window import (
+    STATE_ACTIVE,
+    STATE_DISABLED,
+    STATE_INELIGIBLE,
+    STATE_SCHEDULED,
+    STATE_SKIPPED,
+    STATE_USED,
+    SummerHeatWindowStorage,
+    compute_heat_demand_ratio,
+    find_summer_heat_window,
+    find_summer_heat_window_from_timed_values,
+)
 from .virtual_outdoor_utils import (
     compute_duty_ratio,
     compute_overshoot_warm_bias,
     compute_planned_virtual_outdoor_temperatures,
     compute_virtual_outdoor_from_mpc_step,
+
+    resolve_virtual_heat_offset,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -168,6 +194,14 @@ MAX_VIRTUAL_OUTDOOR = 25.0
 PRICE_HISTORY_MAX_ENTRIES = 2880  # ~30d at 15-minute sampling.
 DECISION_SERIES_MAX_ENTRIES = 192  # Keep decision attributes under recorder size limits.
 THERMAL_PERSIST_INTERVAL = timedelta(minutes=15)
+SUMMER_HEAT_WINDOW_STATE_VERSION = 2
+
+# EKF/RLS coefficient learning is skipped when the elapsed interval exceeds this
+# threshold. A long gap (HA pause, sensor outage) makes the single-step Euler
+# prediction unreliable and the resulting innovation can corrupt the learned
+# loss/gain. Above the threshold we still observe the indoor temperature but
+# leave coefficients unchanged and resume learning on the next normal interval.
+MAX_LEARNING_DT_HOURS = 2.0
 
 NOTIFY_HEALTH_COOLDOWN = timedelta(hours=1)
 NOTIFY_SENSORS_COOLDOWN = timedelta(hours=1)
@@ -244,6 +278,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         )
         self._control_adapter = ControlAdapter(hass, get_state_as_float=self._get_state_as_float)
 
+        self._summer_heat_window_store = SummerHeatWindowStorage(
+            hass.config.path(".storage", f"{DOMAIN}_{entry.entry_id}_summer_heat_window.json")
+        )
+
         self._controller = MpcController(
             target_temperature=self._target_temperature,
             price_comfort_weight=self._price_comfort_weight,
@@ -262,6 +300,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._last_control_on = False
         self._last_result: ControlResult | None = None
         self._last_price_forecast: list[float] = []
+        self._last_price_timed_values: list[TimedValue] = []
         self._last_outdoor_forecast: list[float] = []
         self._last_price_forecast_source: str = self._forecast_service.last_price_forecast_source
         self._last_outdoor_forecast_source: str = self._forecast_service.last_outdoor_forecast_source
@@ -310,6 +349,18 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._performance_history: list[PerformanceSample] = []
         self._last_prediction: dict[str, Any] | None = None
         self._last_performance_persist_time = None
+        self._summer_heat_window: dict[str, Any] = {
+            "state": STATE_DISABLED,
+            "reason": "not_evaluated",
+            "local_day": None,
+            "selected_start": None,
+            "selected_end": None,
+            "selected_average_price": None,
+            "selected_max_price": None,
+            "heat_demand_ratio": None,
+            "eligible": False,
+        }
+        self._last_summer_heat_window_override = False
 
         self._attr_name = "Heat Pump Pilot"
         self._attr_unique_id = f"{entry.entry_id}_climate"
@@ -327,6 +378,12 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._price_absolute_low_window_days = settings.price_absolute_low_window_days
         self._continuous_control_enabled = settings.continuous_control_enabled
         self._continuous_control_window_hours = settings.continuous_control_window_hours
+        self._summer_heat_window_enabled = settings.summer_heat_window_enabled
+        self._summer_heat_window_max_price = settings.summer_heat_window_max_price
+        self._summer_heat_window_duration_minutes = settings.summer_heat_window_duration_minutes
+        self._summer_heat_window_demand_window_hours = settings.summer_heat_window_demand_window_hours
+        self._summer_heat_window_max_heat_demand_ratio = settings.summer_heat_window_max_heat_demand_ratio
+        self._summer_heat_window_virtual_heat_offset = settings.summer_heat_window_virtual_heat_offset
         self._control_interval = settings.control_interval_minutes
         self._prediction_horizon = settings.prediction_horizon_hours
         self._comfort_tolerance = settings.comfort_temperature_tolerance
@@ -364,6 +421,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         await self._load_price_history()
         await self._load_thermal_state()
         await self._load_performance_history()
+        await self._load_summer_heat_window_state()
         self._schedule_control_loop()
         await self._async_run_control()
         self._schedule_price_history_backfill(30)
@@ -378,6 +436,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._options_unsub()
         await self._persist_thermal_state(dt_util.utcnow())
         await self._persist_performance_history(dt_util.utcnow())
+        await self._persist_summer_heat_window_state()
         await self._persist_price_history()
 
     async def _load_price_history(self) -> None:
@@ -660,6 +719,33 @@ class MpcHeatPumpClimate(ClimateEntity):
         await self.hass.async_add_executor_job(self._performance_store.save, payload)
         self._last_performance_persist_time = now
 
+    async def _load_summer_heat_window_state(self) -> None:
+        """Load persisted summer heat window state if available."""
+        payload = await self.hass.async_add_executor_job(self._summer_heat_window_store.load)
+        if not isinstance(payload, dict):
+            return
+        if payload.get("version") != SUMMER_HEAT_WINDOW_STATE_VERSION:
+            return
+        state = payload.get("state")
+        if state not in (STATE_DISABLED, STATE_INELIGIBLE, STATE_SCHEDULED, STATE_ACTIVE, STATE_USED, STATE_SKIPPED):
+            return
+        self._summer_heat_window = {
+            "state": state,
+            "reason": payload.get("reason"),
+            "local_day": payload.get("local_day"),
+            "selected_start": payload.get("selected_start"),
+            "selected_end": payload.get("selected_end"),
+            "selected_average_price": payload.get("selected_average_price"),
+            "selected_max_price": payload.get("selected_max_price"),
+            "heat_demand_ratio": payload.get("heat_demand_ratio"),
+            "eligible": bool(payload.get("eligible", False)),
+        }
+
+    async def _persist_summer_heat_window_state(self) -> None:
+        """Persist selected daily summer heat window state."""
+        payload = {"version": SUMMER_HEAT_WINDOW_STATE_VERSION, **self._summer_heat_window}
+        await self.hass.async_add_executor_job(self._summer_heat_window_store.save, payload)
+
     def _serialize_model_history(self) -> list[list[Any]]:
         """Return model history as JSON-friendly triples."""
         serialized: list[list[Any]] = []
@@ -922,6 +1008,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._update_thermal_model(now, indoor_temp, self._outdoor_temp)
             steps = max(1, int(self._prediction_horizon / self._controller.time_step_hours))
             price_forecast = self._forecast_service.extract_price_forecast(now)
+            self._last_price_timed_values = self._forecast_service.last_price_timed_values
             baseline, baseline_details = compute_price_baseline(
                 history=self._price_history,
                 forecast=price_forecast,
@@ -953,10 +1040,21 @@ class MpcHeatPumpClimate(ClimateEntity):
             )
             self._last_result = result
             self._last_raw_mpc_sequence_head = self._raw_mpc_sequence_head(result.sequence if result else None)
+
+            normal_mpc_decision = decision
+            summer_override = self._update_summer_heat_window(
+                now,
+                price_for_mpc,
+                normal_mpc_decision,
+                self._last_price_timed_values,
+            )
+            control_decision = bool(normal_mpc_decision or summer_override)
             duty_ratio = None
             if self._continuous_control_enabled and result and result.sequence:
                 window_steps = self._continuous_control_window_steps()
                 duty_ratio = compute_duty_ratio(result.sequence, 0, window_steps)
+                if summer_override:
+                    duty_ratio = 1.0
             self._last_duty_ratio = duty_ratio
             predicted_control_temp = None
             if result and len(result.predicted_temperatures) > 1:
@@ -964,21 +1062,29 @@ class MpcHeatPumpClimate(ClimateEntity):
             elif result and result.predicted_temperatures:
                 predicted_control_temp = result.predicted_temperatures[0]
             effective_request = self._build_effective_heat_request(
-                raw_heat_on=decision,
+                raw_heat_on=control_decision,
                 raw_duty_ratio=duty_ratio,
                 predicted_temp=predicted_control_temp,
             )
+            if summer_override:
+                effective_request = resolve_effective_heat_request(
+                    raw_requested_duty_ratio=1.0, previous_effective_duty_ratio=None,
+                    previous_same_ratio_runs=0, predicted_temp=predicted_control_temp,
+                    target_temperature=self._target_temperature, comfort_tolerance=self._comfort_tolerance,
+                    anti_chatter_enabled=False,
+                )
             self._last_raw_requested_duty_ratio = effective_request.raw_requested_duty_ratio
             self._commit_effective_heat_request(effective_request)
             self._last_virtual_outdoor = self._compute_virtual_outdoor(
-                decision,
+                control_decision,
                 outdoor_for_mpc,
                 duty_ratio=effective_request.effective_requested_duty_ratio
                 if self._continuous_control_enabled
                 else duty_ratio,
+                heat_offset=self._summer_heat_window_virtual_heat_offset if summer_override else None,
             )
-            await self._apply_control(decision)
-            self._last_control_on = decision
+            await self._apply_control(control_decision)
+            self._last_control_on = control_decision
             self._last_control_time = now
             if result is not None:
                 self._last_prediction = {
@@ -995,13 +1101,14 @@ class MpcHeatPumpClimate(ClimateEntity):
                 heating_detected=heating_detected,
                 price=current_price,
                 prediction_error=prediction_error,
-                suggested_heat_on=self._last_control_on,
+                suggested_heat_on=normal_mpc_decision,
                 requested_duty_ratio=effective_request.effective_requested_duty_ratio,
             )
             self._publish_decision()
             await self._async_update_notifications(now)
             await self._persist_thermal_state(now)
             await self._persist_performance_history(now)
+            await self._persist_summer_heat_window_state()
             self.async_write_ha_state()
 
     def _schedule_control_loop(self) -> None:
@@ -1026,6 +1133,14 @@ class MpcHeatPumpClimate(ClimateEntity):
         if heat_on is None:
             # No trustworthy heat signal; keep parameters stable and only observe temperature.
             self._thermal_model.observe_temperature(indoor_temp)
+            return
+
+        if dt_hours > MAX_LEARNING_DT_HOURS:
+            # Interval too long for a reliable single-step Euler update; observe
+            # temperature only and resume coefficient learning next normal interval.
+            self._thermal_model.observe_temperature(indoor_temp)
+            if self._heating_detection_active():
+                self._reset_heating_duty_cycle(now)
             return
 
         self._thermal_model.step(indoor_temp, outdoor_for_model, heat_on, dt_hours)
@@ -1310,6 +1425,187 @@ class MpcHeatPumpClimate(ClimateEntity):
             return []
         return [bool(value) for value in sequence[:max_entries]]
 
+    def _reset_summer_heat_window_for_day(self, local_day: str) -> None:
+        """Reset summer heat window state for a new local day."""
+        self._summer_heat_window = {
+            "state": STATE_INELIGIBLE,
+            "reason": "not_evaluated",
+            "local_day": local_day,
+            "selected_start": None,
+            "selected_end": None,
+            "selected_average_price": None,
+            "selected_max_price": None,
+            "heat_demand_ratio": None,
+            "eligible": False,
+        }
+
+    def _parse_summer_window_time(self, key: str):
+        """Parse a persisted local summer heat window timestamp."""
+        raw = self._summer_heat_window.get(key)
+        if not isinstance(raw, str):
+            return None
+        parsed = dt_util.parse_datetime(raw)
+        if parsed is None:
+            return None
+        return dt_util.as_local(parsed)
+
+    def _update_summer_heat_window(
+        self,
+        now,
+        price_forecast: list[float],
+        normal_mpc_decision: bool,
+        timed_price_values: list[TimedValue] | None = None,
+    ) -> bool:
+        """Update daily summer heat-window state and return whether it overrides idle."""
+        self._last_summer_heat_window_override = False
+        local_now = dt_util.as_local(now)
+        local_day = local_now.date().isoformat()
+
+        if not self._summer_heat_window_enabled:
+            self._summer_heat_window = {
+                "state": STATE_DISABLED,
+                "reason": "disabled",
+                "local_day": local_day,
+                "selected_start": None,
+                "selected_end": None,
+                "selected_average_price": None,
+                "selected_max_price": None,
+                "heat_demand_ratio": None,
+                "eligible": False,
+            }
+            return False
+
+        if self._summer_heat_window.get("local_day") != local_day:
+            self._reset_summer_heat_window_for_day(local_day)
+
+        state = self._summer_heat_window.get("state")
+        if state == STATE_USED:
+            return False
+        if state == STATE_SKIPPED and self._summer_heat_window.get("reason") != "no_continuous_price_window":
+            return False
+
+        demand_ratio, demand_samples = compute_heat_demand_ratio(
+            self._performance_history,
+            now=dt_util.as_utc(now),
+            window_hours=self._summer_heat_window_demand_window_hours,
+        )
+        self._summer_heat_window["heat_demand_ratio"] = demand_ratio
+        if demand_ratio is None:
+            self._summer_heat_window.update(
+                {
+                    "state": STATE_INELIGIBLE,
+                    "reason": f"insufficient_heat_demand_history_{demand_samples}_samples",
+                    "eligible": False,
+                    "selected_start": None,
+                    "selected_end": None,
+                    "selected_average_price": None,
+                    "selected_max_price": None,
+                }
+            )
+            return False
+
+        eligible = demand_ratio <= self._summer_heat_window_max_heat_demand_ratio
+        self._summer_heat_window["eligible"] = eligible
+        if not eligible:
+            self._summer_heat_window.update(
+                {
+                    "state": STATE_INELIGIBLE,
+                    "reason": "heat_demand_ratio_above_threshold",
+                    "selected_start": None,
+                    "selected_end": None,
+                    "selected_average_price": None,
+                    "selected_max_price": None,
+                }
+            )
+            return False
+
+        selected_start = self._parse_summer_window_time("selected_start")
+        selected_end = self._parse_summer_window_time("selected_end")
+        if state == STATE_ACTIVE and selected_start is not None and selected_end is not None:
+            if local_now >= selected_end:
+                self._summer_heat_window.update({"state": STATE_USED, "reason": "completed"})
+                return False
+            if local_now >= selected_start:
+                current_price = price_forecast[0] if price_forecast else None
+                try:
+                    current_price_value = float(current_price)
+                except (TypeError, ValueError):
+                    current_price_value = None
+                if current_price_value is None or current_price_value > self._summer_heat_window_max_price:
+                    self._summer_heat_window.update({"state": STATE_USED, "reason": "price_above_max_after_start"})
+                    return False
+                self._summer_heat_window.update({"state": STATE_ACTIVE, "reason": "active"})
+                self._last_summer_heat_window_override = not normal_mpc_decision
+                return not normal_mpc_decision
+
+        if selected_start is not None and selected_end is not None and local_now >= selected_start:
+            if local_now >= selected_end:
+                self._summer_heat_window.update({"state": STATE_USED, "reason": "missed_window"})
+                return False
+            current_price = price_forecast[0] if price_forecast else None
+            try:
+                current_price_value = float(current_price)
+            except (TypeError, ValueError):
+                current_price_value = None
+            if current_price_value is None or current_price_value > self._summer_heat_window_max_price:
+                self._summer_heat_window.update({"state": STATE_USED, "reason": "price_above_max_after_start"})
+                return False
+            self._summer_heat_window.update({"state": STATE_ACTIVE, "reason": "active"})
+            self._last_summer_heat_window_override = not normal_mpc_decision
+            return not normal_mpc_decision
+
+        window = None
+        if timed_price_values:
+            window = find_summer_heat_window_from_timed_values(
+                now=local_now,
+                values=timed_price_values,
+                duration_minutes=self._summer_heat_window_duration_minutes,
+                max_price=self._summer_heat_window_max_price,
+            )
+        else:
+            window = find_summer_heat_window(
+                now=local_now,
+                prices=price_forecast,
+                step_hours=self._controller.time_step_hours,
+                duration_minutes=self._summer_heat_window_duration_minutes,
+                max_price=self._summer_heat_window_max_price,
+            )
+        if window is None:
+            self._summer_heat_window.update(
+                {
+                    "state": STATE_SKIPPED,
+                    "reason": "no_continuous_price_window",
+                    "selected_start": None,
+                    "selected_end": None,
+                    "selected_average_price": None,
+                    "selected_max_price": None,
+                }
+            )
+            return False
+
+        self._summer_heat_window.update(
+            {
+                "state": STATE_SCHEDULED,
+                "reason": "scheduled",
+                "selected_start": window.start.isoformat(timespec="seconds"),
+                "selected_end": window.end.isoformat(timespec="seconds"),
+                "selected_average_price": window.average_price,
+                "selected_max_price": window.max_price,
+            }
+        )
+        return False
+
+    def _summer_heat_window_settings_changed(self, previous_options: dict[str, Any]) -> bool:
+        """Return whether summer heat-window schedule-affecting options changed."""
+        keys = (
+            CONF_SUMMER_HEAT_WINDOW_ENABLED,
+            CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
+            CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+            CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+            CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+        )
+        return any(previous_options.get(key) != self._options.get(key) for key in keys)
+
     async def _handle_control_interval(self, now) -> None:
         """Callback for periodic control loop."""
         self._request_control_run()
@@ -1384,6 +1680,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._weather_entity = self.config_entry.data[CONF_WEATHER_FORECAST_ENTITY]
         self._controlled_entity = self.config_entry.data.get(CONF_CONTROLLED_ENTITY)
         self._options = merge_climate_options(self.config_entry.options)
+        summer_window_settings_changed = self._summer_heat_window_settings_changed(previous_options)
         self._apply_runtime_settings(build_runtime_settings(self._options))
         self._forecast_service.update_entities(
             price_entity=self._price_entity,
@@ -1392,6 +1689,8 @@ class MpcHeatPumpClimate(ClimateEntity):
             prediction_horizon=self._prediction_horizon,
         )
         now = dt_util.utcnow()
+        if summer_window_settings_changed and self._summer_heat_window.get("state") not in (STATE_ACTIVE, STATE_USED):
+            self._reset_summer_heat_window_for_day(dt_util.as_local(now).date().isoformat())
         if self._heating_detection_active():
             self._reset_heating_duty_cycle(now)
         else:
@@ -1537,7 +1836,12 @@ class MpcHeatPumpClimate(ClimateEntity):
         return max(minimum, value)
 
     def _compute_virtual_outdoor(
-        self, heat_on: bool, outdoor_forecast: list[float], *, duty_ratio: float | None = None
+        self,
+        heat_on: bool,
+        outdoor_forecast: list[float],
+        *,
+        duty_ratio: float | None = None,
+        heat_offset: float | None = None,
     ) -> float | None:
         """Compute the virtual outdoor temperature to send to the pump interface."""
         base = None
@@ -1551,7 +1855,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         if base is None:
             base = VIRTUAL_OUTDOOR_IDLE_FALLBACK
 
-        offset = max(0.0, float(self._virtual_heat_offset))
+        offset = resolve_virtual_heat_offset(self._virtual_heat_offset, heat_offset)
         price_ratio_cap = getattr(self._controller, "price_ratio_cap", DEFAULT_PRICE_RATIO_CAP)
         predicted_temp = self._indoor_temp
         if self._last_result and self._last_result.predicted_temperatures:
@@ -1752,6 +2056,9 @@ class MpcHeatPumpClimate(ClimateEntity):
         )
         payload = {
             "suggested_heat_on": self._last_control_on,
+            "mpc_suggested_heat_on": (
+                self._last_result.sequence[0] if self._last_result and self._last_result.sequence else None
+            ),
             "suggested_virtual_outdoor_temperature": suggested_virtual_outdoor_temperature,
             "suggested_virtual_outdoor_temperature_raw": self._last_virtual_outdoor_raw,
             "raw_mpc_sequence_head": list(self._last_raw_mpc_sequence_head),
@@ -1816,6 +2123,19 @@ class MpcHeatPumpClimate(ClimateEntity):
             "anti_chatter_limited": self._last_anti_chatter_limited,
             "anti_chatter_reason": self._last_anti_chatter_reason,
             "continuous_control_virtual_outdoor_shift": self._last_virtual_outdoor_shift,
+            "summer_heat_window_enabled": self._summer_heat_window_enabled,
+            "summer_heat_window_max_price": self._summer_heat_window_max_price,
+            "summer_heat_window_duration_minutes": self._summer_heat_window_duration_minutes,
+            "summer_heat_window_virtual_heat_offset": self._summer_heat_window_virtual_heat_offset,
+            "summer_heat_window_eligible": self._summer_heat_window.get("eligible"),
+            "summer_heat_window_selected_start": self._summer_heat_window.get("selected_start"),
+            "summer_heat_window_selected_end": self._summer_heat_window.get("selected_end"),
+            "summer_heat_window_selected_average_price": self._summer_heat_window.get("selected_average_price"),
+            "summer_heat_window_selected_max_price": self._summer_heat_window.get("selected_max_price"),
+            "summer_heat_window_state": self._summer_heat_window.get("state"),
+            "summer_heat_window_reason": self._summer_heat_window.get("reason"),
+            "summer_heat_window_heat_demand_ratio": self._summer_heat_window.get("heat_demand_ratio"),
+            "summer_heat_window_override_active": self._last_summer_heat_window_override,
             "virtual_outdoor_smoothing_enabled": self._virtual_outdoor_smoothing_enabled,
             "virtual_outdoor_smoothing_alpha": self._virtual_outdoor_smoothing_alpha,
             "cost": self._last_result.cost if self._last_result else None,
@@ -1860,6 +2180,8 @@ class MpcHeatPumpClimate(ClimateEntity):
                 "price_classification": price_classification_mpc,
                 "current_price": current_price,
                 "price_baseline": self._last_result.price_baseline if self._last_result else None,
+                "summer_heat_window_state": self._summer_heat_window.get("state"),
+                "summer_heat_window_override_active": self._last_summer_heat_window_override,
                 **heating_gap,
             }
         publish_entry_diagnostics(

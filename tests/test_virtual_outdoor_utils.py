@@ -16,6 +16,8 @@ from virtual_outdoor_utils import (  # noqa: E402
     compute_overshoot_warm_bias,
     compute_planned_virtual_outdoor_temperatures,
     compute_virtual_outdoor_from_mpc_step,
+
+    resolve_virtual_heat_offset,
 )
 
 
@@ -180,6 +182,15 @@ def test_continuous_virtual_outdoor_no_backoff_during_partial_heating() -> None:
     )
     # Without backoff, ratio=0.2 maps directly to base + offset*(1 - 2*ratio) = 13.0.
     assert value == 13.0
+
+def test_summer_override_can_use_separate_virtual_heat_offset() -> None:
+    normal_offset = resolve_virtual_heat_offset(6.0)
+    summer_offset = resolve_virtual_heat_offset(6.0, 16.0)
+
+    assert normal_offset == 6.0
+    assert summer_offset == 16.0
+    assert 24.0 - normal_offset == 18.0
+    assert 24.0 - summer_offset == 8.0
 
 
 def test_planned_virtual_outdoor_continuous_mode() -> None:

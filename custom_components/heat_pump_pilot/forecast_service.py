@@ -81,6 +81,7 @@ class ForecastService:
 
     def extract_price_forecast(self, now) -> list[float]:
         """Extract price forecast from the configured entity."""
+        self.last_price_timed_values = []
         state = self.hass.states.get(self._price_entity)
         if not state:
             self.last_price_forecast_source = "unavailable"
@@ -96,6 +97,7 @@ class ForecastService:
             source = "nordpool_raw"
             timed = extract_timed_values(raw_today)
             timed.extend(extract_timed_values(raw_tomorrow))
+            self.last_price_timed_values = timed
             forecast = align_forecast_to_now(timed, now)
         else:
             if "prices" in attrs:
