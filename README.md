@@ -1046,7 +1046,13 @@ supply warms, the pump continues under temperature control instead of blindly
 switching off when the exercise timer expires.
 
 Pump transition times and exercise state are persisted in `.storage` and restored
-after restart. Short temperature qualification timers restart: downtime is not
+after restart. An unavailable switch returning to the same state retains its
+exercise idle history, including during startup. A confirmed state change resets
+that history; unobserved activity during downtime cannot be inferred. Minimum
+on/off safeguards restart after switch unavailability independently of the
+exercise idle timer. UFH diagnostics expose persisted `exercise_idle_since`,
+`state_since`, `exercise_day` and `exercise_until` for dashboard use.
+Short temperature qualification timers restart: downtime is not
 proof that the supply stayed hot or cold. An unknown switch is not commanded;
 unknown, restored, invalid or stale temperature holds current pump states. The
 configurable stale limit uses the sensor's last report, not its last value change.

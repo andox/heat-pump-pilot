@@ -14,6 +14,7 @@ class PumpState:
     since: float | None = None
     exercise_until: float | None = None
     exercise_day: str | None = None
+    control_since: float | None = None
 
 
 class UfhController:
@@ -55,9 +56,13 @@ class UfhController:
                 self.unavailable.add(entity)
             if state in ('on', 'off') and (p.state != state or entity in self.unavailable):
                 self.unavailable.discard(entity)
-                p.state, p.since = state, now
-                if state == 'off':
-                    p.exercise_until = None
+                # Reconnection is not evidence that the pump ran. Preserve the
+                # exercise history, but restart short minimum on/off safeguards.
+                p.control_since = now
+                if p.state != state:
+                    p.state, p.since = state, now
+                    if state == 'off':
+                        p.exercise_until = None
         error = validate_ufh(c)
         if error or not c['ufh_enabled'] or monitor_only:
             self.hot_since = self.cold_since = None
@@ -88,8 +93,9 @@ class UfhController:
                 self.reasons[entity] = 'switch_unavailable'
                 continue
             elapsed = max(0, now - (p.since if p.since is not None else now))
+            control_elapsed = max(0, now - (p.control_since if p.control_since is not None else p.since if p.since is not None else now))
             if state == 'off':
-                off_ready = elapsed >= float(c['ufh_min_off_minutes']) * 60
+                off_ready = control_elapsed >= float(c['ufh_min_off_minutes']) * 60
                 if hot_ready and off_ready:
                     commands[entity] = True
                     self.reasons[entity] = 'warm_supply'
@@ -117,11 +123,11 @@ class UfhController:
                         commands[entity] = False
                         self.reasons[entity] = 'exercise_complete'
                         continue
-                if cold_ready and elapsed >= float(c['ufh_min_on_minutes']) * 60:
+                if cold_ready and control_elapsed >= float(c['ufh_min_on_minutes']) * 60:
                     commands[entity] = False
                     self.reasons[entity] = 'cold_supply'
                 else:
-                    self.reasons[entity] = 'minimum_on' if cold and elapsed < float(c['ufh_min_on_minutes']) * 60 else 'circulating_heat'
+                    self.reasons[entity] = 'minimum_on' if cold and control_elapsed < float(c['ufh_min_on_minutes']) * 60 else 'circulating_heat'
         return commands
 
     def export_state(self):
@@ -144,6 +150,8 @@ class UfhController:
                     p.exercise_until = None
                 if p.exercise_day is not None and not isinstance(p.exercise_day, str):
                     p.exercise_day = None
+                if p.control_since is not None and (not isinstance(p.control_since, (int, float)) or not math.isfinite(p.control_since) or not 0 <= p.control_since <= now):
+                    p.control_since = None
                 self.pumps[entity] = p
             except (TypeError, ValueError):
                 continue

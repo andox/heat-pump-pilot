@@ -128,3 +128,27 @@ def test_coordinator_serializes_event_refreshes(tmp_path):
         assert maximum==1
         await c.async_stop()
     asyncio.run(run())
+
+
+def test_restart_with_restored_then_unavailable_switch_exposes_saved_idle(tmp_path):
+    c,now,states,services,_,state=harness(tmp_path)
+    async def run():
+        states['sensor.supply']=state('20')
+        await c.async_start()
+        since=c.model.pumps['switch.a'].since
+        await c.async_stop()
+        other,later,readings,calls,_,make_state=harness(tmp_path)
+        later[0]=now[0]+timedelta(minutes=2)
+        readings['sensor.supply']=make_state('20')
+        readings['switch.a']=make_state('off',restored=True)
+        await other.async_start()
+        readings['switch.a']=make_state('unavailable')
+        await other.async_refresh()
+        later[0]+=timedelta(seconds=10)
+        readings['switch.a']=make_state('off')
+        await other.async_refresh()
+        assert other.diagnostics['pumps']['switch.a']['exercise_idle_since']==since
+        calls.assert_not_awaited()
+        await other.async_stop()
+        assert other.store.load()['pumps']['switch.a']['since']==since
+    asyncio.run(run())

@@ -132,7 +132,12 @@ class UfhCoordinator:
             'supply_temperature': temperature,
             'sensor_fresh': fresh,
             'pumps': {e: {'state': states[e], 'reason': self.model.reasons.get(e, self.model.status),
-                          'command': commands.get(e)} for e in states},
+                          'command': commands.get(e),
+                          'state_since': self.model.pumps[e].since,
+                          'last_confirmed_state': self.model.pumps[e].state,
+                          'exercise_idle_since': self.model.pumps[e].since if self.model.pumps[e].state == 'off' else None,
+                          'exercise_day': self.model.pumps[e].exercise_day,
+                          'exercise_until': self.model.pumps[e].exercise_until} for e in states},
             'switch_errors': failures,
         }
         try:

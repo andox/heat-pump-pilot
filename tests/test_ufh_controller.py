@@ -189,3 +189,48 @@ def test_invalid_saved_options_do_not_generate_commands():
     c=UfhController({'ufh_enabled':True,'ufh_switches':None})
     assert tick(c,0,35)=={}
     assert c.status=='ufh_invalid_settings'
+
+
+def test_restart_unavailable_off_preserves_daily_exercise_eligibility():
+    c=controller(ufh_exercise_enabled=True,ufh_exercise_idle_hours=24)
+    tick(c,0)
+    saved=c.export_state()
+    other=controller(ufh_exercise_enabled=True,ufh_exercise_idle_hours=24)
+    other.restore(saved,START.timestamp()+86400-120)
+    assert tick(other,86400-120,a=None,b='unavailable')=={}
+    assert tick(other,86400-110)=={}
+    assert all(p.since==START.timestamp() for p in other.pumps.values())
+    # At 13:00 the existing 24h history still qualifies both pumps.
+    assert tick(other,86400+60)=={'switch.a':True,'switch.b':True}
+
+
+def test_reconnection_preserves_history_but_actual_run_resets_idle():
+    c=controller()
+    tick(c,0)
+    tick(c,400,a='unavailable')
+    tick(c,410)
+    assert c.pumps['switch.a'].since==START.timestamp()
+    assert c.pumps['switch.a'].control_since==START.timestamp()+410
+    tick(c,420,a='on')
+    tick(c,500)
+    assert c.pumps['switch.a'].since==START.timestamp()+500
+    assert c.pumps['switch.b'].since==START.timestamp()
+
+
+def test_restart_during_exercise_with_unavailable_switch_preserves_deadline():
+    c=exercise_controller();start_exercise(c)
+    other=exercise_controller();other.restore(c.export_state(),START.timestamp()+80)
+    assert tick(other,80,a=None,b=None)=={}
+    assert tick(other,90,a='on',b='on')=={}
+    assert other.pumps['switch.a'].since==START.timestamp()+61
+    assert tick(other,120,a='on',b='on')=={'switch.a':False,'switch.b':False}
+    tick(other,121)
+    assert tick(other,122)=={}
+
+
+def test_legacy_saved_pump_state_restores_without_control_since():
+    c=controller()
+    c.restore({'version':1,'pumps':{'switch.a':{'state':'off','since':START.timestamp()}}},START.timestamp()+10)
+    tick(c,10,a=None)
+    tick(c,20)
+    assert c.pumps['switch.a'].since==START.timestamp()
