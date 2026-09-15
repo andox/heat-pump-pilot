@@ -16,9 +16,9 @@ heating.
 Repository: https://github.com/andox/heat-pump-pilot
 
 ## Features
-- MPC optimizer (binary on/off) with price vs comfort weighting.
+- MPC optimizer with price vs comfort weighting and optional learned pump delay.
 - Virtual outdoor temperature control with price-aware warm bias.
-- Two learning models: EKF (extended Kalman filter) or RLS (recursive least squares).
+- Hourly adaptive house learning with heat loss, heating gain and background warmth; legacy EKF/RLS remain available.
 - Optional heating detection via supply/flow temperature sensor.
 - Diagnostic sensors for decisions, health, learning state, price state, and scores.
 - Comfort score, price score, and prediction accuracy metrics.
@@ -62,6 +62,11 @@ signal used for learning must come from a supply temperature sensor or a
 controlled entity state (switch on / climate hvac_action == heating). If no
 reliable heat signal exists, learning is disabled.
 
+Everyday comfort settings appear first, followed by **Sensors and heat pump**.
+Advanced settings are in collapsed groups at the bottom: control, prices,
+learning, detection, overshoot, initial estimates and diagnostics. Existing
+options retain their original storage keys.
+
 ## Configuration options and defaults
 Below are the main options exposed in the config/option flows, with defaults and
 recommended values when you’re unsure. Values are in the UI unless noted.
@@ -70,11 +75,31 @@ Core control:
 - Target temperature (default: 21.0°C): your comfort setpoint; set to your normal desired indoor temp.
 - Price priority (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.4-0.6.
 - Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
-- Price baseline window (default: 24 h): how much recent observed history is used alongside forecasts when scaling prices (24/48/72 h).
+- Price baseline window (default: 24 h): how much timestamped observed history
+  is used alongside known future prices when scaling prices (24/48/72 h).
+  The median includes zero and negative prices; the normalization baseline has
+  a positive floor of 0.01 in the configured price units.
 - Absolute low-price threshold (default: auto): cap classification at `normal` when the current price is below the threshold (`auto` = median of recent history, `off` disables the cap).
 - Absolute low-price auto window (default: 30 d): window used for the `auto` threshold (7/14/30 days).
+
+Price forecasts with timestamps are sampled at the actual MPC timestamps,
+including 15-minute, hourly and daylight-saving transitions. Missing periods
+stay missing in baseline calculations. For planning only, Pilot holds the last
+known price (or the current sensor price before the first known interval).
+The decision sensor exposes known/total forecast steps and the fallback policy.
+Untimed legacy `prices`/`forecast` lists use an hourly convention; timestamped
+data is preferred because its interval is unambiguous.
+
+Price history stores dated 15-minute buckets and excludes data outside the
+requested time window. Recorder backfill holds each valid state for at most
+one hour, ending earlier at the next state change, including unavailable states.
+Older saved history without timestamps is rebuilt from Recorder after an update;
+until then, the baseline uses available forecast/new observations. This does not
+reset learned house coefficients.
+
+Further control options:
 - Continuous control enabled (default: true): smooths virtual outdoor temperature using MPC duty ratio.
-- Continuous control window (default: 2 h): horizon used to compute the duty ratio (1–4 h).
+- Continuous control window (default: 2 h): duty averaging horizon for the fallback binary planner (1–4 h). The validated response planner chooses duty directly.
 - Summer low-price heat window (default: off): optionally schedules one daily
   continuous heat window during low-demand periods when every price sample in
   the window is at or below the configured absolute max price.
@@ -106,9 +131,12 @@ Virtual outdoor control:
 - Virtual outdoor smoothing alpha (default: 0.5): 0–1; lower is smoother/slower, higher is more responsive.
 
 Learning:
-- Learning model (default: ekf): ekf is stable; rls can react faster to changes.
+- Learning model (new-install default: adaptive): jointly learns loss, heating gain and background warmth. Existing explicit EKF/RLS selections are retained.
+- Learning interval (default: 60 min, range: 30–120): independent of the control interval.
+- House learning history (default: 72 h, range: 24–168): rolling adaptive fitting window.
+- Learn delayed pump response (default: enabled): learns from actual number states and measured heating. Planning requires validation, identifiable house gain, continuous control and a 15-minute control interval.
 - RLS forgetting factor (default: 0.99): lower = faster adaptation; 0.97–0.995 is typical.
-- Learning window (default: 12 h): history window used to decide stable vs learning; 12–24 h is a good balance.
+- Learning window (default: 12 h): legacy EKF/RLS stability diagnostic, separate from the adaptive fitting window.
 - Thermal response seed (default: 0.5): initial guess for loss/gain; leave default unless you know your system.
 - Base heat loss coefficient (default: 0.05): used until learning refines it; leave default in most cases.
 - Initial indoor temp (default: unset): optional override; leave empty to use sensor value.
@@ -219,43 +247,120 @@ Use this sensor as the outdoor temperature entity, and use the `weather.home`
 entity for forecasts.
 
 ## Learning (thermal model)
-Heat Pump Pilot learns two coefficients:
-- **heat_loss_coeff**: how fast the home leaks heat to the outdoors.
-- **heat_gain_coeff**: how much heating raises indoor temperature.
+The default control interval remains **15 minutes**, with existing sensor-triggered
+runs. A separate one-minute observation timer and sensor events collect evidence;
+they do not run MPC. Coefficients update only after a complete learning interval,
+normally **60 minutes**.
 
-Learning requires a "heat on" signal:
-- **Preferred**: heating supply/flow temperature sensor with threshold, hysteresis,
-  and debounce. The signal is only used when the supply temperature is clearly
-  on/off (outside the on/off margins).
-- **Fallback (controlling mode)**: assume the last applied MPC decision is the
-  heat signal.
-- **Fallback (monitor-only mode)**: use controlled entity state if it clearly
-  indicates heating (switch on or climate hvac_action == heating).
+Intervals pair indoor temperature change with time-weighted outdoor temperature
+and heating during the same period. At least 95% coverage is required. Unknown
+states, runtime gaps over five minutes and temperature jumps above 2°C/hour are
+excluded. Partial intervals are discarded after restart. Unchanged readings are
+held; this cannot detect a sensor that silently stops reporting.
 
-If no reliable heat signal exists, the estimator only tracks indoor temperature
-and does *not* update the coefficients.
+All models need measured heating: supply/flow temperature with threshold,
+hysteresis, debounce and on/off margins, or the controlled switch/climate state.
+A virtual outdoor request is **not** evidence of heating. With a `number.*`
+output, configure a heating detection sensor. Without a usable signal, the
+coefficients stay unchanged. Supply temperature remains a proxy affected by
+sensor placement and domestic-hot-water cycles.
 
-### EKF model (default)
-The EKF state is `[indoor_temp, heat_loss_coeff, heat_gain_coeff]`.
-At each step:
-1. Predict the next temperature using the current coefficients.
-2. Compute the innovation from the measured temperature.
-3. Update the coefficients and covariance, with process/measurement noise.
-4. Clamp coefficients to safe ranges (`heat_loss_coeff` 0.001–0.25, `heat_gain_coeff` 0.1–1.5).
+### Adaptive house model
 
-### RLS model
-The RLS model estimates `[heat_gain_coeff, heat_loss_coeff]` from the change in
-temperature:
-- Uses a forgetting factor (0.90 to 1.00, default 0.99).
-- Updates on each sample using `dT = measured - last_temp`.
-- Decouples cross-covariance when heating is off to avoid gain drift.
-- Clamps coefficients to safe ranges (`heat_loss_coeff` 0.001–0.25, `heat_gain_coeff` 0.1–1.5).
+```text
+indoor change per hour = loss × (outdoor − indoor) + gain × measured heating + background
+```
 
-### Learning state
-Learning state uses a rolling window of model history (default 12 h):
-- If the relative change in loss and gain stays under 5%, the model is **stable**.
-- Otherwise, it is **learning**.
-- If no heat signal is available, learning is **disabled**.
+The three terms are fitted together. Background represents unexplained net
+warmth/cooling, such as solar or household gains, and is included in MPC
+forecasts. It is not a separately measured physical source.
+
+Fitting needs 24 usable hours and changing indoor/outdoor temperature differences.
+Gain remains frozen unless there are three equivalent heating hours, three
+coasting hours, and heating variation independent of outdoor temperature. Summer
+history therefore cannot reliably identify winter heating capacity. Existing
+loss/gain bounds (0.001–0.25 and 0.1–1.5) remain; background is bounded at
+±0.5°C/hour. Parameter changes are also limited per elapsed hour.
+
+For an existing installation, select **Options → Advanced: learning → Learning
+model → adaptive**. Learned loss/gain values carry over; changing an initial
+estimate explicitly reseeds them. Background starts at zero when entering
+adaptive mode. New installations default to adaptive. Sensor or detector changes
+discard the associated observation history.
+
+### Delayed pump response
+
+A separate model learns request strength, idle heating, delay (0–120 minutes)
+and response smoothing from complete 15-minute averages of the actual controlled
+number state and measured heating. It requires at least 28 continuous usable
+hours with heating, coasting and varying requests; it fits at most hourly on up
+to 72 hours of history.
+
+The same learner also tests a small outdoor-temperature correction, without an
+additional configuration setting. Its target heating fraction is
+`clip(idle + request_gain * delayed_request + outdoor_gain * (reference - outdoor) / 10, 0, 1)`.
+The reference is the training period's mean outdoor temperature. The additional
+coefficient is constrained to 0–0.5 heating fraction per 10°C colder; it cannot
+make colder weather reduce heating or reverse the effect of a stronger request.
+This models the observed effect of the heat pump's curve, not its exact curve
+settings or measured thermal output. Outdoor temperature acts on the current
+interval's response target; request delay and response smoothing remain separate.
+
+The outdoor correction requires complete outdoor history, at least 4°C variation
+in training, and at least 1°C residual standard deviation after accounting for
+request strength at every candidate delay. It must improve held-out heating MAE
+by both 10% and 0.01 heating fraction compared with the existing delayed model,
+as well as pass the baseline checks below. Otherwise the existing delayed model
+remains the candidate. Forecast outdoor temperatures are clamped to the training
+range for this correction, so mild-weather observations are not extrapolated
+into unobserved winter conditions. The ordinary house heat-loss calculation
+still uses the actual forecast temperature.
+
+Saved pump observations now include their interval-average outdoor temperature.
+Older observations are retained for the simpler fit with outdoor marked unknown;
+they are not assigned invented temperatures. Fresh validation is still required
+after a restart. The decision sensor's `pump_response` attributes expose
+`outdoor_active`, `outdoor_reason`, `outdoor_gain_per_10c`, `outdoor_range_c` and
+both candidate validation errors. `outdoor_active` means the learner accepted
+the correction; `pump_response_planning_active` separately indicates whether
+the latest MPC plan actually used response learning.
+
+Delay is selected on training observations. The following four hours must show
+at least 10% lower heating prediction error than both direct-request and
+constant-duty baselines. Restarts, gaps and failed validation suspend readiness.
+The binary planner remains the fallback. When using the adaptive house model,
+its heating gain must also be identifiable before response planning activates.
+
+When eligible, MPC chooses 0/25/50/75/100% requested duty and simulates delayed
+heating, output limits and smoothing. The price penalty follows predicted
+heating, including heating that continues after a request stops. The first duty
+is applied directly; forecasts are replayed after the current output is limited.
+Future hysteresis and unexpected sensor-triggered decisions are approximations;
+subsequent control runs replan using observations. Optimization runs outside
+Home Assistant's event loop.
+
+Heating runtime is a price-cost proxy. This does not measure electrical power,
+COP or guaranteed electricity savings.
+
+### Legacy EKF and RLS
+
+Existing selections remain supported with the same complete learning intervals.
+EKF updates temperature/loss/gain covariance; RLS estimates loss/gain with its
+forgetting factor. Neither adds background warmth. Noise/forgetting settings
+apply per coefficient update, so hourly updates adapt more slowly than repeated
+updates on every sensor-triggered control run.
+
+### Learning diagnostics
+
+Climate and Decision attributes expose `learning_details`, `pump_response` and
+`pump_response_planning_active`. Climate also exposes `estimated_background_gain`;
+Decision exposes planned duty and predicted heating. Adaptive `fit_status`
+distinguishes insufficient history, insufficient weather variation, frozen gain
+and learning. Frozen coefficients are not evidence of convergence. Legacy models
+retain their rolling 5% loss/gain stability indicator.
+
+See [the offline replay tool](tools/README.md) for comparisons using exported
+Home Assistant history.
 
 ## Price baseline and classification
 The integration uses a single baseline for both MPC and classification:
@@ -334,10 +439,32 @@ Key diagnostic sensors:
 - Heat Pump Pilot Virtual Outdoor: the current virtual outdoor temperature sent to the pump.
 - Heat Pump Pilot Virtual Outdoor Trace: rolling history of recent virtual outdoor decisions
   (see the `trace` attribute for detailed entries).
-- Heat Pump Pilot Comfort Score: percent of samples within comfort tolerance.
-- Heat Pump Pilot Price Score: how well heating aligns with low prices.
+- Heat Pump Pilot Comfort Score: percent of covered time within target ± comfort
+  tolerance. Attributes separate `too_cold_pct` and `too_warm_pct`, and quantify
+  discomfort beyond the band in cold/warm degree-hours. A warm house can score
+  poorly even with heating off; this measures comfort, not who caused the error.
+- Heat Pump Pilot Price Score: heating timing on a 0–100 scale. 50 means heating
+  at the average observed price; 100 means the cheapest possible allocation of
+  the same heating duration, and 0 the most expensive. Unknown heating periods
+  are excluded. No heating, no idle comparison, or constant prices produce an
+  unknown score with an explanatory `reason` attribute.
 - Heat Pump Pilot Prediction Accuracy: MAE plus RMSE/bias for predicted indoor temperature.
 - Heat Pump Pilot Heating Detected (binary): debounced heating detection from supply sensor.
+
+Comfort and price scores weight observations by elapsed time, capped at one
+configured control interval per observation. Additional updates do not receive
+extra weight, and long gaps are not filled. `covered_hours` and `coverage_pct`
+show how much of the selected performance window was usable. They remain
+estimates from control-loop observations, so short heating cycles can be missed.
+Comfort uses each observation's target and the current configured tolerance.
+
+The price score is a timing diagnostic, **not measured electricity or money
+saved**. It assumes equal heating power and compares theoretical schedules that
+may not satisfy the house's thermal constraints. The
+`price_advantage_per_kwh_proxy` attribute is average available price minus
+average price during detected heating; it is not a metered saving. Price scores
+from this method (`equal_runtime_price_opportunity_v2`) are not directly
+comparable to older scores based on the minimum/maximum price alone.
 
 ## Dashboard card (example)
 This grid card is safe to paste into a Lovelace dashboard.
@@ -888,3 +1015,46 @@ To add a new learning model:
 - Heating detection via supply/flow sensor improves learning quality and speed.
 - Weather forecast data is optional but improves prediction accuracy; the weather entity itself
   is still required in the config flow.
+
+
+### Optional UFH circulation pump control
+
+In **Configure → Advanced: UFH circulation pumps**, enable the feature, select
+its own heat-pump supply temperature sensor, and select one or more pump switches.
+It is disabled by default. Select individual switches to track each pump's runtime
+and idle period separately. Disable the old UFH automation before enabling this
+controller; do not let both own the same switches.
+
+Circulation follows **measured supply temperature only**. Neither an MPC request,
+Pilot's HVAC mode, electricity prices, nor Summer Heating authorizes or blocks
+circulation. The feature continues when Pilot HVAC is off because the heat pump
+can produce heat independently. The integration's **Monitor only** setting still
+suppresses all UFH commands.
+
+Defaults are 30°C to start, 25°C to stop, 30 seconds continuously hot before
+starting, 60 minutes minimum heating runtime, 5 minutes minimum off time, and
+30 minutes continuously cold before stopping. A rise above the stop threshold
+restarts the cold timer; a drop below the start threshold restarts the hot timer.
+These defaults are configurable and must suit the installed circulation system.
+
+**Advanced: UFH pump exercise** has a separate enable switch (off by default),
+local daily time (13:00), duration (15 minutes), and minimum idle period (24 hours).
+It does not depend on Summer Heating. Each eligible pump is exercised at most once
+per local day; a missed exercise time is not replayed after downtime. Exercise
+can end before the normal minimum heating runtime if the supply is cold. If the
+supply warms, the pump continues under temperature control instead of blindly
+switching off when the exercise timer expires.
+
+Pump transition times and exercise state are persisted in `.storage` and restored
+after restart. Short temperature qualification timers restart: downtime is not
+proof that the supply stayed hot or cold. An unknown switch is not commanded;
+unknown, restored, invalid or stale temperature holds current pump states. The
+configurable stale limit uses the sensor's last report, not its last value change.
+Inspect **Heat Pump Pilot UFH Control** for per-pump reasons, sensor faults and
+switch errors. Failed commands are retried on subsequent evaluations. Decisions
+react to entity changes and a 10-second timer, independently of the MPC interval.
+
+Disabling/removing UFH control leaves the switches in their current states and
+releases control. It does not issue an unconditional off command. This optional
+controller is for suitable external UFH circulation pumps, not the heat pump's
+primary circulation or a substitute for its built-in protections.

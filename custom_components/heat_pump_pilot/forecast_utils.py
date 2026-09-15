@@ -57,7 +57,7 @@ def extract_timed_values(raw: Iterable[Any] | None) -> list[TimedValue]:
         if isinstance(item, dict):
             value_raw = item.get("value")
             if value_raw is None:
-                value_raw = item.get("price") or item.get("average") or item.get("total")
+                value_raw = next((item[k] for k in ("price", "average", "total") if item.get(k) is not None), None)
             try:
                 numeric = float(value_raw)
             except (TypeError, ValueError):
@@ -201,3 +201,32 @@ def expand_to_steps(values: Iterable[float] | None, steps: int, step_hours: floa
     if len(expanded) < steps:
         expanded.extend([expanded[-1]] * (steps - len(expanded)))
     return expanded[:steps]
+
+
+def price_grid(values: Iterable[TimedValue], now: datetime, steps: int, step_hours: float) -> list[float | None]:
+    """Sample actual price intervals at MPC timestamps; gaps stay unknown.
+
+    Explicit end times take precedence. Missing ends can be inferred from the
+    next start, capped at one hour. UTC arithmetic avoids DST discontinuities.
+    """
+    now = _ensure_aware(now).astimezone(timezone.utc)
+    unique = {v.start.astimezone(timezone.utc): v for v in values if v.start is not None}
+    ordered = sorted(unique.items())
+    result = []
+    index = 0
+    for i in range(steps):
+        when = now + timedelta(hours=i * step_hours)
+        while index + 1 < len(ordered) and ordered[index + 1][0] <= when:
+            index += 1
+        value = None
+        if ordered:
+            start, entry = ordered[index]
+            end = entry.end
+            if end is None:
+                end = start + timedelta(hours=1)
+                if index + 1 < len(ordered):
+                    end = min(end, ordered[index + 1][0])
+            if start <= when < end and math.isfinite(entry.value):
+                value = entry.value
+        result.append(value)
+    return result

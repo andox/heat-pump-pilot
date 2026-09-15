@@ -7,9 +7,17 @@ from typing import Any
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 
 from .const import (
+    LEARNING_MODEL_ADAPTIVE,
+    CONF_LEARNING_INTERVAL_MINUTES,
+    CONF_LEARNING_FIT_WINDOW_HOURS,
+    CONF_PUMP_RESPONSE_ENABLED,
+    DEFAULT_LEARNING_INTERVAL_MINUTES,
+    DEFAULT_LEARNING_FIT_WINDOW_HOURS,
+    DEFAULT_PUMP_RESPONSE_ENABLED,
     CONF_COMFORT_TEMPERATURE_TOLERANCE,
     CONF_CONTROL_INTERVAL_MINUTES,
     CONF_CONTROLLED_ENTITY,
@@ -110,6 +118,9 @@ from .const import (
     PERFORMANCE_WINDOW_OPTIONS,
     LEARNING_WINDOW_OPTIONS,
 )
+from .ufh_settings import UFH_DEFAULTS, UFH_NUMBERS, ufh_options, validate_ufh
+from .config_sections import SECTIONS, group_for, flatten_input
+from .runtime_settings import merge_climate_options
 from .config_helpers import build_unique_id, find_conflicting_entry_id, normalize_hvac_mode
 
 
@@ -121,6 +132,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> config_entries.FlowResult:
         """Handle the initial configuration step."""
         if user_input is not None:
+            user_input = flatten_input(user_input)
             controlled_entity_raw = user_input.get(CONF_CONTROLLED_ENTITY)
             controlled_entity = controlled_entity_raw.strip() if isinstance(controlled_entity_raw, str) else None
             if not controlled_entity:
@@ -236,7 +248,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_LEARNING_MODEL, default=DEFAULT_LEARNING_MODEL
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=[LEARNING_MODEL_EKF, LEARNING_MODEL_RLS],
+                        options=[LEARNING_MODEL_ADAPTIVE, LEARNING_MODEL_EKF, LEARNING_MODEL_RLS],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
@@ -253,7 +265,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
 
-        return self.async_show_form(step_id="user", data_schema=data_schema)
+        return self.async_show_form(step_id="user", data_schema=group_schema(data_schema))
 
     @staticmethod
     @callback
@@ -274,6 +286,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         current_data = self._config_entry.data
         errors: dict[str, str] = {}
         if user_input is not None:
+            user_input = flatten_input(user_input, {**merge_climate_options(self._config_entry.options), **current_data})
             controlled_entity_raw = user_input.get(CONF_CONTROLLED_ENTITY)
             controlled_entity = controlled_entity_raw.strip() if isinstance(controlled_entity_raw, str) else None
             if not controlled_entity:
@@ -288,7 +301,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 candidate_unique_id=unique_id,
                 current_entry_id=self._config_entry.entry_id,
             )
-            if conflict_entry_id is not None:
+            ufh_error = validate_ufh(user_input)
+            if not ufh_error and user_input.get("ufh_enabled"):
+                selected = set(user_input.get("ufh_switches", []))
+                if controlled_entity in selected or any(
+                    e.entry_id != self._config_entry.entry_id and e.options.get("ufh_enabled")
+                    and selected.intersection(e.options.get("ufh_switches", []))
+                    for e in self.hass.config_entries.async_entries(DOMAIN)
+                ):
+                    ufh_error = "ufh_switch_conflict"
+            if ufh_error:
+                errors["base"] = ufh_error
+            elif conflict_entry_id is not None:
                 errors["base"] = "already_configured"
             else:
                 new_data = {
@@ -303,6 +327,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     user_input.get(CONF_HEATING_DETECTION_ENABLED, DEFAULT_HEATING_DETECTION_ENABLED)
                 )
                 new_options = {
+                    **ufh_options(user_input),
                     CONF_TARGET_TEMPERATURE: user_input[CONF_TARGET_TEMPERATURE],
                     CONF_PRICE_COMFORT_WEIGHT: user_input[CONF_PRICE_COMFORT_WEIGHT],
                     CONF_CONTROL_INTERVAL_MINUTES: user_input[CONF_CONTROL_INTERVAL_MINUTES],
@@ -413,24 +438,27 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_INITIAL_HEAT_GAIN: user_input.get(CONF_INITIAL_HEAT_GAIN),
                     CONF_INITIAL_HEAT_LOSS_OVERRIDE: user_input.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE),
                 }
+                for key in (CONF_LEARNING_INTERVAL_MINUTES, CONF_LEARNING_FIT_WINDOW_HOURS,
+                            CONF_PUMP_RESPONSE_ENABLED, CONF_LEARNING_WINDOW_HOURS):
+                    new_options[key] = user_input[key]
                 self.hass.config_entries.async_update_entry(
                     self._config_entry,
                     data=new_data,
                     unique_id=unique_id,
                 )
                 return self.async_create_entry(title="", data=new_options)
-        return self.async_show_form(step_id="init", data_schema=self._build_options_schema(), errors=errors)
+        return self.async_show_form(step_id="init", data_schema=self._build_options_schema(user_input), errors=errors)
 
-    def _build_options_schema(self) -> vol.Schema:
+    def _build_options_schema(self, values=None) -> vol.Schema:
         """Build the options schema (extracted to reuse on validation errors)."""
-        current_data = self._config_entry.data
-        options = self._config_entry.options
+        current_data = {**self._config_entry.data, **(values or {})}
+        options = {**self._config_entry.options, **(values or {})}
         absolute_threshold_default = options.get(
             CONF_PRICE_ABSOLUTE_LOW_THRESHOLD, DEFAULT_PRICE_ABSOLUTE_LOW_THRESHOLD
         )
         if isinstance(absolute_threshold_default, (int, float)):
             absolute_threshold_default = str(absolute_threshold_default)
-        return vol.Schema(
+        flat = vol.Schema(
             {
                 # Inputs and output.
                 vol.Required(
@@ -750,7 +778,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 # Heating detection.
                 vol.Optional(
                     CONF_HEATING_SUPPLY_TEMP_ENTITY,
-                    default=options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY),
+                    default=options.get(CONF_HEATING_SUPPLY_TEMP_ENTITY) or vol.UNDEFINED,
                 ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["sensor"])),
                 vol.Required(
                     CONF_HEATING_DETECTION_ENABLED,
@@ -827,7 +855,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     default=options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL),
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=[LEARNING_MODEL_EKF, LEARNING_MODEL_RLS],
+                        options=[LEARNING_MODEL_ADAPTIVE, LEARNING_MODEL_EKF, LEARNING_MODEL_RLS],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),
@@ -905,3 +933,41 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 ): selector.BooleanSelector(),
             }
         )
+
+        extra = {
+            vol.Required(CONF_LEARNING_INTERVAL_MINUTES, default=options.get(CONF_LEARNING_INTERVAL_MINUTES, DEFAULT_LEARNING_INTERVAL_MINUTES)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=30, max=120, step=30, unit_of_measurement="min", mode=selector.NumberSelectorMode.BOX)),
+            vol.Required(CONF_LEARNING_FIT_WINDOW_HOURS, default=options.get(CONF_LEARNING_FIT_WINDOW_HOURS, DEFAULT_LEARNING_FIT_WINDOW_HOURS)): selector.NumberSelector(
+                selector.NumberSelectorConfig(min=24, max=168, step=24, unit_of_measurement="h", mode=selector.NumberSelectorMode.BOX)),
+            vol.Required(CONF_PUMP_RESPONSE_ENABLED, default=options.get(CONF_PUMP_RESPONSE_ENABLED, DEFAULT_PUMP_RESPONSE_ENABLED)): selector.BooleanSelector(),
+        }
+        for key, default in UFH_DEFAULTS.items():
+            value = options.get(key, default)
+            if key == 'ufh_supply_entity':
+                marker = vol.Optional(key, default=value) if value else vol.Optional(key)
+                extra[marker] = selector.EntitySelector(selector.EntitySelectorConfig(domain=['sensor'], device_class='temperature'))
+            elif key == 'ufh_switches':
+                extra[vol.Required(key, default=value)] = selector.EntitySelector(selector.EntitySelectorConfig(domain=['switch'], multiple=True))
+            elif key in UFH_NUMBERS:
+                low, high, step, unit = UFH_NUMBERS[key]
+                extra[vol.Required(key, default=value)] = selector.NumberSelector(selector.NumberSelectorConfig(min=low, max=high, step=step, unit_of_measurement=unit, mode=selector.NumberSelectorMode.BOX))
+            elif key == 'ufh_exercise_time':
+                extra[vol.Required(key, default=value)] = selector.TimeSelector()
+            else:
+                extra[vol.Required(key, default=value)] = selector.BooleanSelector()
+        return group_schema(vol.Schema({**flat.schema, **extra}))
+
+
+def group_schema(flat):
+    """Put everyday settings first and all advanced groups last."""
+    grouped = {}
+    for marker, validator in flat.schema.items():
+        if group_for(marker.schema) is None:
+            grouped[marker] = validator
+    for name in SECTIONS:
+        fields = {marker: validator for marker, validator in flat.schema.items() if group_for(marker.schema) == name}
+        if fields:
+            # A group default of {} makes the frontend skip child defaults,
+            # leaving saved values blank even though server validation fills them.
+            grouped[vol.Required(name)] = section(vol.Schema(fields), {"collapsed": name.startswith("advanced_")})
+    return vol.Schema(grouped)

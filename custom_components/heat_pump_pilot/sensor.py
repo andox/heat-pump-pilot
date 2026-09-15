@@ -23,6 +23,7 @@ from .const import (
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
     """Set up sensors for a config entry."""
     entities: list[SensorEntity] = [
+        UfhPumpControlSensor(hass, entry),
         MpcHeatPumpDecisionSensor(hass, entry),
         MpcHeatPumpHealthSensor(hass, entry),
         MpcHeatPumpControlStateSensor(hass, entry),
@@ -455,3 +456,34 @@ class MpcHeatPumpPredictionAccuracySensor(_MpcHeatPumpPerformanceSensor):
         if not self._performance:
             return {}
         return self._performance.get("prediction_details") or {}
+
+
+class UfhPumpControlSensor(SensorEntity):
+    """Independent circulation status, including unavailable inputs and switch failures."""
+    _attr_should_poll = False
+    _attr_icon = "mdi:pump"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hass, entry):
+        self.hass = hass
+        self.entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_ufh_control"
+        self._attr_name = "Heat Pump Pilot UFH Control"
+
+    async def async_added_to_hass(self):
+        from .ufh_coordinator import UFH_SIGNAL
+        self.async_on_remove(async_dispatcher_connect(
+            self.hass, f"{UFH_SIGNAL}_{self.entry.entry_id}", self._updated))
+
+    @callback
+    def _updated(self):
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self):
+        return self.extra_state_attributes.get('state', 'disabled')
+
+    @property
+    def extra_state_attributes(self):
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id, {}).get('ufh')
+        return coordinator.diagnostics if coordinator else {}

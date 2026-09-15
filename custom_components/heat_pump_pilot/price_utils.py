@@ -37,8 +37,13 @@ def compute_price_baseline(
     time_step_hours: float,
     window_hours: int,
     baseline_floor: float,
+    forecast_is_step: bool = False,
 ) -> tuple[float, dict[str, int]]:
-    """Compute a baseline from recent history plus available forecast."""
+    """Median of known prices, including zero/negative, with a positive scale floor.
+
+    Callers supply history already restricted by timestamp. Untimed forecasts
+    are hourly unless explicitly marked as controller-step data.
+    """
     steps_per_hour = int(round(1 / time_step_hours)) if time_step_hours > 0 else 1
     steps_per_hour = max(1, steps_per_hour)
     max_history_samples = max(0, int(window_hours) * steps_per_hour)
@@ -47,13 +52,14 @@ def compute_price_baseline(
     history_values = _coerce_float_iterable(history)
     if max_history_samples:
         history_values = history_values[-max_history_samples:]
-    history_positive = [value for value in history_values if value > 0]
+    history_known = history_values
 
-    forecast_values = _coerce_float_iterable(forecast)
+    forecast_raw = list(forecast) if forecast is not None else []
+    if forecast_is_step is True:
+        forecast_raw = forecast_raw[:max_forecast_samples]
+    forecast_values = _coerce_float_iterable(forecast_raw)
     forecast_expanded: list[float] = []
     if forecast_values:
-        expected_step_samples = steps_per_hour * min(int(window_hours), 24)
-        forecast_is_step = time_step_hours < 1 and len(forecast_values) >= expected_step_samples
         if forecast_is_step:
             forecast_expanded = list(forecast_values)
         else:
@@ -66,16 +72,16 @@ def compute_price_baseline(
             forecast_expanded = forecast_expanded[:max_forecast_samples]
         else:
             forecast_expanded = []
-    forecast_positive = [value for value in forecast_expanded if value > 0]
+    forecast_known = forecast_expanded
 
-    baseline_pool = history_positive + forecast_positive
+    baseline_pool = history_known + forecast_known
     baseline = median(baseline_pool) if baseline_pool else baseline_floor
     if baseline <= baseline_floor:
         baseline = baseline_floor
 
     details = {
-        "history_samples": len(history_positive),
-        "forecast_samples": len(forecast_positive),
+        "history_samples": len(history_known),
+        "forecast_samples": len(forecast_known),
     }
     return baseline, details
 
@@ -94,12 +100,12 @@ def compute_absolute_low_price_threshold(
     history_values = _coerce_float_iterable(history)
     if max_history_samples:
         history_values = history_values[-max_history_samples:]
-    history_positive = [value for value in history_values if value > 0]
+    history_known = history_values
 
-    if not history_positive:
+    if not history_known:
         return None, {"history_samples": 0}
 
-    return median(history_positive), {"history_samples": len(history_positive)}
+    return median(history_known), {"history_samples": len(history_known)}
 
 
 _PRICE_LABEL_ORDER = ("very_low", "low", "normal", "high", "very_high", "extreme")

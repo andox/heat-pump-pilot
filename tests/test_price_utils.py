@@ -35,7 +35,7 @@ def test_price_baseline_uses_window_and_forecast() -> None:
     assert details["forecast_samples"] == 8
 
 
-def test_price_baseline_ignores_non_positive_values() -> None:
+def test_price_baseline_includes_non_positive_values_with_positive_floor() -> None:
     baseline, details = compute_price_baseline(
         history=[0.0, -1.0],
         forecast=[0.0, -0.5],
@@ -44,8 +44,8 @@ def test_price_baseline_ignores_non_positive_values() -> None:
         baseline_floor=PRICE_BASELINE_FLOOR,
     )
     assert baseline == pytest.approx(PRICE_BASELINE_FLOOR)
-    assert details["history_samples"] == 0
-    assert details["forecast_samples"] == 0
+    assert details["history_samples"] == 2
+    assert details["forecast_samples"] == 2
 
 
 def test_price_baseline_uses_forecast_when_no_history() -> None:
@@ -66,6 +66,7 @@ def test_price_baseline_does_not_expand_subhourly_forecast() -> None:
     baseline, details = compute_price_baseline(
         history=[],
         forecast=forecast,
+        forecast_is_step=True,
         time_step_hours=0.25,
         window_hours=48,
         baseline_floor=PRICE_BASELINE_FLOOR,
@@ -106,8 +107,8 @@ def test_absolute_low_threshold_from_history() -> None:
         time_step_hours=1.0,
         window_hours=24,
     )
-    assert threshold == pytest.approx(0.3)
-    assert details["history_samples"] == 3
+    assert threshold == pytest.approx(0.2)
+    assert details["history_samples"] == 5
 
 
 def test_absolute_low_threshold_respects_window() -> None:

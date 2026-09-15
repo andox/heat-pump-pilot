@@ -10,21 +10,29 @@ from dataclasses import dataclass
 from typing import Any
 
 try:
+    from .ufh_settings import ufh_options
     from .config_helpers import normalize_hvac_mode
     from .const import (
-    CONF_SUMMER_HEAT_WINDOW_ENABLED,
-    CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
-    CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
-    CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
-    CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
-    CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
-    DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
-    DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
-    DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
-    DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
-    DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
-    DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+        CONF_SUMMER_HEAT_WINDOW_ENABLED,
+        CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
+        CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+        CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+        CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+        CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+        DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
+        DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
+        DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+        DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+        DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+        DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
 
+        LEARNING_MODEL_ADAPTIVE,
+        CONF_LEARNING_INTERVAL_MINUTES,
+        CONF_LEARNING_FIT_WINDOW_HOURS,
+        CONF_PUMP_RESPONSE_ENABLED,
+        DEFAULT_LEARNING_INTERVAL_MINUTES,
+        DEFAULT_LEARNING_FIT_WINDOW_HOURS,
+        DEFAULT_PUMP_RESPONSE_ENABLED,
         CONF_COMFORT_TEMPERATURE_TOLERANCE,
         CONF_CONTINUOUS_CONTROL_ENABLED,
         CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
@@ -109,23 +117,32 @@ try:
         PRICE_BASELINE_WINDOW_OPTIONS,
         PRICE_PENALTY_CURVES,
     )
+    from .adaptive_model import AdaptiveThermalModel
     from .thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator
 except ImportError:  # pragma: no cover - direct test imports
+    from ufh_settings import ufh_options
     from config_helpers import normalize_hvac_mode  # type: ignore
     from const import (
-    CONF_SUMMER_HEAT_WINDOW_ENABLED,
-    CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
-    CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
-    CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
-    CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
-    CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
-    DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
-    DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
-    DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
-    DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
-    DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
-    DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+        CONF_SUMMER_HEAT_WINDOW_ENABLED,
+        CONF_SUMMER_HEAT_WINDOW_MAX_PRICE,
+        CONF_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+        CONF_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+        CONF_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+        CONF_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
+        DEFAULT_SUMMER_HEAT_WINDOW_ENABLED,
+        DEFAULT_SUMMER_HEAT_WINDOW_MAX_PRICE,
+        DEFAULT_SUMMER_HEAT_WINDOW_DURATION_MINUTES,
+        DEFAULT_SUMMER_HEAT_WINDOW_DEMAND_WINDOW_HOURS,
+        DEFAULT_SUMMER_HEAT_WINDOW_MAX_HEAT_DEMAND_RATIO,
+        DEFAULT_SUMMER_HEAT_WINDOW_VIRTUAL_HEAT_OFFSET,
   # type: ignore
+        LEARNING_MODEL_ADAPTIVE,
+        CONF_LEARNING_INTERVAL_MINUTES,
+        CONF_LEARNING_FIT_WINDOW_HOURS,
+        CONF_PUMP_RESPONSE_ENABLED,
+        DEFAULT_LEARNING_INTERVAL_MINUTES,
+        DEFAULT_LEARNING_FIT_WINDOW_HOURS,
+        DEFAULT_PUMP_RESPONSE_ENABLED,
         CONF_COMFORT_TEMPERATURE_TOLERANCE,
         CONF_CONTINUOUS_CONTROL_ENABLED,
         CONF_CONTINUOUS_CONTROL_WINDOW_HOURS,
@@ -210,6 +227,7 @@ except ImportError:  # pragma: no cover - direct test imports
         PRICE_BASELINE_WINDOW_OPTIONS,
         PRICE_PENALTY_CURVES,
     )
+    from adaptive_model import AdaptiveThermalModel
     from thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator  # type: ignore
 
 
@@ -228,7 +246,7 @@ def _coerce_float(value: Any) -> float | None:
 def _coerce_int(value: Any, default: int, minimum: int | None = None) -> int:
     try:
         numeric = int(round(float(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         numeric = default
     if minimum is not None:
         numeric = max(minimum, numeric)
@@ -266,6 +284,9 @@ class ClimateRuntimeSettings:
     overshoot_warm_bias_hysteresis: float
     heat_loss_coefficient: Any
     thermal_response_seed: Any
+    learning_interval_minutes: int
+    learning_fit_window_hours: int
+    pump_response_enabled: bool
     learning_model: str
     rls_forgetting_factor: float
     learning_window_hours: int
@@ -470,7 +491,7 @@ def merge_climate_options(options: dict[str, Any]) -> dict[str, Any]:
         learning_window = DEFAULT_LEARNING_WINDOW_HOURS
 
     learning_model = options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL)
-    if learning_model not in (LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
+    if learning_model not in (LEARNING_MODEL_ADAPTIVE, LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
         learning_model = DEFAULT_LEARNING_MODEL
 
     rls_factor = _coerce_float(options.get(CONF_RLS_FORGETTING_FACTOR))
@@ -479,6 +500,7 @@ def merge_climate_options(options: dict[str, Any]) -> dict[str, Any]:
     rls_factor = min(1.0, max(0.9, float(rls_factor)))
 
     return {
+        **ufh_options(options),
         CONF_TARGET_TEMPERATURE: target_temperature,
         CONF_PRICE_COMFORT_WEIGHT: price_comfort_weight,
         CONF_PRICE_PENALTY_CURVE: price_penalty_curve,
@@ -510,6 +532,9 @@ def merge_climate_options(options: dict[str, Any]) -> dict[str, Any]:
         CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS: overshoot_hysteresis,
         CONF_HEAT_LOSS_COEFFICIENT: options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT),
         CONF_THERMAL_RESPONSE_SEED: options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
+        CONF_LEARNING_INTERVAL_MINUTES: min(120, max(30, _coerce_int(options.get(CONF_LEARNING_INTERVAL_MINUTES), DEFAULT_LEARNING_INTERVAL_MINUTES))),
+        CONF_LEARNING_FIT_WINDOW_HOURS: min(168, max(24, _coerce_int(options.get(CONF_LEARNING_FIT_WINDOW_HOURS), DEFAULT_LEARNING_FIT_WINDOW_HOURS))),
+        CONF_PUMP_RESPONSE_ENABLED: bool(options.get(CONF_PUMP_RESPONSE_ENABLED, DEFAULT_PUMP_RESPONSE_ENABLED)),
         CONF_LEARNING_MODEL: learning_model,
         CONF_RLS_FORGETTING_FACTOR: rls_factor,
         CONF_LEARNING_WINDOW_HOURS: learning_window,
@@ -571,6 +596,9 @@ def build_runtime_settings(options: dict[str, Any]) -> ClimateRuntimeSettings:
         overshoot_warm_bias_hysteresis=normalized[CONF_OVERSHOOT_WARM_BIAS_HYSTERESIS],
         heat_loss_coefficient=normalized[CONF_HEAT_LOSS_COEFFICIENT],
         thermal_response_seed=normalized[CONF_THERMAL_RESPONSE_SEED],
+        learning_interval_minutes=normalized[CONF_LEARNING_INTERVAL_MINUTES],
+        learning_fit_window_hours=normalized[CONF_LEARNING_FIT_WINDOW_HOURS],
+        pump_response_enabled=normalized[CONF_PUMP_RESPONSE_ENABLED],
         learning_model=normalized[CONF_LEARNING_MODEL],
         rls_forgetting_factor=normalized[CONF_RLS_FORGETTING_FACTOR],
         learning_window_hours=normalized[CONF_LEARNING_WINDOW_HOURS],
@@ -593,14 +621,14 @@ def build_runtime_settings(options: dict[str, Any]) -> ClimateRuntimeSettings:
 
 def build_thermal_model_from_options(
     options: dict[str, Any],
-) -> ThermalModelEstimator | ThermalModelRlsEstimator:
+) -> ThermalModelEstimator | ThermalModelRlsEstimator | AdaptiveThermalModel:
     """Create a thermal model estimator based on normalized options."""
     base_loss = options.get(CONF_HEAT_LOSS_COEFFICIENT, DEFAULT_HEAT_LOSS_COEFFICIENT)
     initial_heat_loss = options.get(CONF_INITIAL_HEAT_LOSS_OVERRIDE, base_loss)
     if initial_heat_loss is None:
         initial_heat_loss = base_loss
     learning_model = options.get(CONF_LEARNING_MODEL, DEFAULT_LEARNING_MODEL)
-    if learning_model not in (LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
+    if learning_model not in (LEARNING_MODEL_ADAPTIVE, LEARNING_MODEL_EKF, LEARNING_MODEL_RLS):
         learning_model = DEFAULT_LEARNING_MODEL
     rls_factor = _coerce_float(options.get(CONF_RLS_FORGETTING_FACTOR))
     if rls_factor is None:
@@ -613,6 +641,14 @@ def build_thermal_model_from_options(
             initial_heat_gain=options.get(CONF_INITIAL_HEAT_GAIN),
             initial_temp=options.get(CONF_INITIAL_INDOOR_TEMP),
             forgetting_factor=rls_factor,
+        )
+    if learning_model == LEARNING_MODEL_ADAPTIVE:
+        return AdaptiveThermalModel(
+            window_hours=options.get(CONF_LEARNING_FIT_WINDOW_HOURS, DEFAULT_LEARNING_FIT_WINDOW_HOURS),
+            seed=options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),
+            initial_heat_loss=initial_heat_loss,
+            initial_heat_gain=options.get(CONF_INITIAL_HEAT_GAIN),
+            initial_temp=options.get(CONF_INITIAL_INDOOR_TEMP),
         )
     return ThermalModelEstimator(
         seed=options.get(CONF_THERMAL_RESPONSE_SEED, DEFAULT_THERMAL_RESPONSE_SEED),

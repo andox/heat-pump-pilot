@@ -87,7 +87,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {"options": dict(entry.options)}
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    from .ufh_coordinator import UfhCoordinator
+
+    ufh = UfhCoordinator(hass, entry)
+    hass.data[DOMAIN][entry.entry_id]["ufh"] = ufh
+    try:
+        await ufh.async_start()
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        await ufh.async_stop()
+        raise
 
     update_unsub = entry.add_update_listener(async_update_listener)
     hass.data[DOMAIN][entry.entry_id]["update_unsub"] = update_unsub
@@ -98,6 +107,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok and DOMAIN in hass.data:
+        ufh = hass.data[DOMAIN].get(entry.entry_id, {}).get("ufh")
+        if ufh:
+            await ufh.async_stop()
         update_unsub = hass.data[DOMAIN].get(entry.entry_id, {}).pop("update_unsub", None)
         if update_unsub:
             update_unsub()
@@ -119,4 +131,6 @@ async def async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None
     if previous_trace_enabled != current_trace_enabled:
         await hass.config_entries.async_reload(entry.entry_id)
         return
+    if ufh := entry_data.get("ufh"):
+        await ufh.async_update_options()
     async_dispatcher_send(hass, f"{SIGNAL_OPTIONS_UPDATED}_{entry.entry_id}")

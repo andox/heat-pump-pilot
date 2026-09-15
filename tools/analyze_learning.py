@@ -23,6 +23,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "custom_components" / "heat_pump_pilot"))
 from thermal_model import ThermalModelEstimator, ThermalModelRlsEstimator  # noqa: E402
+from adaptive_model import AdaptiveThermalModel  # noqa: E402
+from learning_manager import LearningManager  # noqa: E402
 
 INDOOR = "sensor.sonoff_snzb_02d_temperature"
 OUTDOOR = "sensor.outdoor_temperature"
@@ -271,6 +273,19 @@ def build_candidates(intervals, train_end):
                 last_hour = hour
             states[t] = fitted
         snapshots[name], inputs[name] = states, heat
+    # Exercise the production collector and adaptive model on the same prepared
+    # intervals. Minute ticks hold each interval's measured means; they create no
+    # extra coefficient updates or synthetic temperature interpolation.
+    model = AdaptiveThermalModel(initial_heat_loss=seed[0], initial_heat_gain=seed[1])
+    manager = LearningManager(model)
+    states = {}
+    for t, row in sorted(intervals.items()):
+        manager.observe(t, row.indoor, row.outdoor, row.heat)
+        states[t] = (model.heat_loss_coeff, model.heat_gain_coeff, model.background_gain)
+        for elapsed in range(60, STEP, 60):
+            manager.observe(t + elapsed, row.indoor, row.outdoor, row.heat)
+        manager.observe(t + STEP, row.next_indoor, None, None)
+    snapshots["adaptive_hourly"], inputs["adaptive_hourly"] = states, raw_heat
     return snapshots, inputs
 
 
@@ -363,7 +378,7 @@ def main():
     snapshots, inputs = build_candidates(intervals, train_end)
     predictions = evaluate(intervals, snapshots, inputs, train_end, test_start, end)
     scores = metrics(predictions)
-    selection = [s for s in scores if s["split"] == "validation" and s["horizon_hours"] == 6 and s["model"] not in ("recorded_model", "persistence")]
+    selection = [s for s in scores if s["split"] == "validation" and s["horizon_hours"] == 6 and s["model"] not in ("recorded_model", "persistence", "adaptive_hourly")]
     if not selection:
         parser.error("No complete six-hour validation windows")
     selected = min(selection, key=lambda row: row["mae"])["model"]
@@ -381,7 +396,7 @@ def main():
     audit["split"] = {"training_start": iso(start), "validation_start": iso(train_end), "test_start": iso(test_start), "end": iso(end), "selected_on_validation_6h_mae": selected}
     audit["source_sha256"] = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in (args.history, args.attributes)}
     (args.output / "audit.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
-    lines = ["# Historical learning experiment", "", f"Sources: `{args.history.name}` and `{args.attributes.name}`. All dates UTC.", "", f"Training: {iso(start)} to {iso(train_end)}. Validation: to {iso(test_start)}. Test: to {iso(end)}.", "", f"Selected on validation six-hour MAE: **{selected}**.", "", "## Data", "", f"Valid recent coverage: {audit['recent']['valid_hours']:.2f} hours; excluded: {audit['recent']['excluded_hours']:.2f} hours. Detected heating: {audit['recent']['detected_heating_hours']:.2f} hours.", f"Recorded control intervals: median {audit['recent']['median_control_interval_minutes']:.2f} minutes; {audit['recent']['updates_under_five_minutes']} intervals below five minutes.", "", "## Prediction errors", "", "Errors in degrees C. The test period is later than the selection period.", "", "| Split | Horizon | Model | Origins | MAE | RMSE | Bias |", "|---|---:|---|---:|---:|---:|---:|"]
+    lines = ["# Historical learning experiment", "", f"Sources: `{args.history.name}` and `{args.attributes.name}`. All dates UTC.", "", f"Training: {iso(start)} to {iso(train_end)}. Validation: to {iso(test_start)}. Test: to {iso(end)}.", "", f"Selected on validation six-hour MAE: **{selected}**.", "", "## Data", "", f"Valid recent coverage: {audit['recent']['valid_hours']:.2f} hours; excluded: {audit['recent']['excluded_hours']:.2f} hours. Detected heating: {audit['recent']['detected_heating_hours']:.2f} hours.", f"Recorded control intervals: median {audit['recent']['median_control_interval_minutes']:.2f} minutes; {audit['recent']['updates_under_five_minutes']} intervals below five minutes.", "", "The adaptive_hourly model was added after inspecting this dataset. Its results are retrospective and are excluded from the original candidate-selection procedure; new independent heating-season history is needed.", "", "## Prediction errors", "", "Errors in degrees C. The test period is later than the selection period.", "", "| Split | Horizon | Model | Origins | MAE | RMSE | Bias |", "|---|---:|---|---:|---:|---:|---:|"]
     for s in scores:
         lines.append(f"| {s['split']} | {s['horizon_hours']}h | {s['model']} | {s['n']} | {s['mae']:.3f} | {s['rmse']:.3f} | {s['bias']:.3f} |")
     lines += ["", "## Heating information by split", "", "| Split | Known hours | Detected heating hours |", "|---|---:|---:|"]

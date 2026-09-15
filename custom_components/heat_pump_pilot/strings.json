@@ -5,16 +5,31 @@
         "title": "Heat Pump Pilot",
         "description": "Configure the MPC-based thermostat.",
         "data": {
-          "indoor_temp_entity": "Indoor temperature sensor",
-          "outdoor_temp_entity": "Outdoor temperature sensor",
-          "weather_forecast_entity": "Weather forecast entity",
-          "price_entity": "Electricity price entity",
-          "controlled_entity": "Entity to control (optional). Supports climate, switch, number, and some custom domains.",
           "monitor_only": "Monitor only (do not send control commands)",
           "target_temperature": "Target indoor temperature",
-          "price_comfort_weight": "Price priority (0 = comfort, 1 = price)",
-          "learning_model": "Learning model",
-          "rls_forgetting_factor": "RLS forgetting factor"
+          "price_comfort_weight": "Price priority (0 = comfort, 1 = price)"
+        },
+        "sections": {
+          "connections": {
+            "name": "Sensors and heat pump",
+            "data": {
+              "indoor_temp_entity": "Indoor temperature sensor",
+              "outdoor_temp_entity": "Outdoor temperature sensor",
+              "weather_forecast_entity": "Weather forecast entity",
+              "price_entity": "Electricity price entity",
+              "controlled_entity": "Entity to control (optional). Supports climate, switch, number, and some custom domains."
+            }
+          },
+          "advanced_learning": {
+            "name": "Advanced: learning",
+            "data": {
+              "learning_model": "Learning model",
+              "rls_forgetting_factor": "RLS forgetting factor"
+            },
+            "data_description": {
+              "learning_model": "Adaptive learns heat loss, heating gain and background warmth together. Existing EKF/RLS choices are retained. All models update on complete learning intervals."
+            }
+          }
         }
       }
     }
@@ -27,49 +42,148 @@
         "data": {
           "target_temperature": "Target indoor temperature",
           "price_comfort_weight": "Price priority (0 = comfort, 1 = price)",
-          "price_baseline_window_hours": "Price baseline window (hours)",
-          "price_absolute_low_threshold": "Absolute low-price threshold (auto/off or value)",
-          "price_absolute_low_window_days": "Absolute low-price auto window (days)",
-          "continuous_control_enabled": "Enable continuous control mode",
-          "continuous_control_window_hours": "Continuous control window (hours)",
-          "summer_heat_window_enabled": "Enable summer low-price heat window",
-          "summer_heat_window_max_price": "Summer heat window max price",
-          "summer_heat_window_duration_minutes": "Summer heat window duration (minutes)",
-          "summer_heat_window_demand_window_hours": "Summer heat demand history window (hours)",
-          "summer_heat_window_max_heat_demand_ratio": "Summer heat max recent heat demand ratio",
-          "summer_heat_window_virtual_heat_offset": "Summer heat virtual outdoor offset (°C)",
-          "virtual_outdoor_trace_enabled": "Enable decision trace",
-          "control_interval_minutes": "Control interval (minutes)",
-          "prediction_horizon_hours": "Prediction horizon (hours)",
           "comfort_temperature_tolerance": "Comfort tolerance (°C)",
-          "performance_window_hours": "Performance window (hours)",
-          "learning_window_hours": "Learning window (hours)",
-          "monitor_only": "Monitor only (do not send control commands)",
-          "virtual_outdoor_heat_offset": "Virtual outdoor heat offset (°C)",
-          "virtual_outdoor_min_temp": "Virtual outdoor minimum (°C)",
-          "price_penalty_curve": "Price penalty curve",
-          "overshoot_warm_bias_enabled": "Enable overshoot warm-bias",
-          "overshoot_warm_bias_curve": "Overshoot warm-bias curve",
-          "overshoot_warm_bias_hysteresis_enabled": "Enable overshoot warm-bias hysteresis",
-          "overshoot_warm_bias_hysteresis": "Overshoot warm-bias hysteresis (°C)",
-          "virtual_outdoor_smoothing_enabled": "Enable virtual outdoor smoothing",
-          "virtual_outdoor_smoothing_alpha": "Virtual outdoor smoothing alpha (EMA)",
-          "heat_loss_coefficient": "Heat loss coefficient (house inertia)",
-          "thermal_response_seed": "Initial thermal response (0 = light, 1 = heavy)",
-          "learning_model": "Learning model",
-          "rls_forgetting_factor": "RLS forgetting factor",
-          "heating_supply_temp_entity": "Heating supply/flow temperature sensor (optional)",
-          "heating_detection_enabled": "Enable heating detection from supply/flow temperature",
-          "heating_supply_temp_threshold": "Supply/flow temperature threshold for heating-on (°C)",
-          "heating_supply_temp_hysteresis": "Heating detection hysteresis (°C)",
-          "heating_supply_temp_debounce_seconds": "Heating detection debounce time (seconds)",
-          "learning_supply_temp_on_margin": "Learning: on margin above threshold (°C)",
-          "learning_supply_temp_off_margin": "Learning: off margin below threshold (°C)",
-          "initial_indoor_temp": "Initial indoor temperature seed (optional)",
-          "initial_heat_loss_override": "Initial heat loss override (optional)",
-          "initial_heat_gain_coefficient": "Initial heat gain override (optional)"
+          "monitor_only": "Monitor only (do not send control commands)"
+        },
+        "sections": {
+          "connections": {
+            "name": "Sensors and heat pump",
+            "data": {
+              "heating_supply_temp_entity": "Heating supply/flow temperature sensor (optional)",
+              "heating_detection_enabled": "Enable heating detection from supply/flow temperature",
+              "heating_supply_temp_threshold": "Supply/flow temperature threshold for heating-on (°C)",
+              "indoor_temp_entity": "Indoor temperature sensor",
+              "outdoor_temp_entity": "Outdoor temperature sensor",
+              "price_entity": "Electricity price entity",
+              "weather_forecast_entity": "Weather forecast entity",
+              "controlled_entity": "Entity to control (optional)"
+            }
+          },
+          "advanced_control": {
+            "name": "Advanced: control and virtual outdoor temperature",
+            "data": {
+              "continuous_control_enabled": "Enable continuous control mode",
+              "continuous_control_window_hours": "Continuous control window (hours)",
+              "control_interval_minutes": "Control interval (minutes)",
+              "prediction_horizon_hours": "Prediction horizon (hours)",
+              "virtual_outdoor_heat_offset": "Virtual outdoor swing range (°C)",
+              "virtual_outdoor_min_temp": "Virtual outdoor minimum (°C)",
+              "virtual_outdoor_smoothing_enabled": "Enable virtual outdoor smoothing",
+              "virtual_outdoor_smoothing_alpha": "Virtual outdoor smoothing alpha (EMA)"
+            }
+          },
+          "advanced_prices": {
+            "name": "Advanced: electricity prices",
+            "data": {
+              "price_baseline_window_hours": "Price baseline window (hours)",
+              "price_absolute_low_threshold": "Absolute low-price threshold (auto/off or value)",
+              "price_absolute_low_window_days": "Absolute low-price auto window (days)",
+              "price_penalty_curve": "Price penalty curve"
+            }
+          },
+          "advanced_learning": {
+            "name": "Advanced: learning",
+            "data": {
+              "learning_model": "Learning model",
+              "rls_forgetting_factor": "RLS forgetting factor",
+              "learning_interval_minutes": "Learning interval (minutes)",
+              "learning_fit_window_hours": "House learning history (hours)",
+              "pump_response_enabled": "Learn delayed pump response"
+            },
+            "data_description": {
+              "learning_model": "Adaptive learns heat loss, heating gain and background warmth together. Existing EKF/RLS choices are retained. All models update on complete learning intervals.",
+              "learning_interval_minutes": "Collect observations each minute; update the house model only after this interval. Does not change the control interval.",
+              "learning_fit_window_hours": "Adaptive model only. Requires at least 24 hours of usable observations and changing outdoor temperatures.",
+              "pump_response_enabled": "For number entities with measured heating and 15-minute control. Used in planning only after later observations confirm better predictions."
+            }
+          },
+          "advanced_detection": {
+            "name": "Advanced: heating detection",
+            "data": {
+              "heating_supply_temp_hysteresis": "Heating detection hysteresis (°C)",
+              "heating_supply_temp_debounce_seconds": "Heating detection debounce time (seconds)",
+              "learning_supply_temp_on_margin": "Learning: on margin above threshold (°C)",
+              "learning_supply_temp_off_margin": "Learning: off margin below threshold (°C)"
+            }
+          },
+          "advanced_overshoot": {
+            "name": "Advanced: temperature overshoot",
+            "data": {
+              "overshoot_warm_bias_enabled": "Enable overshoot warm-bias",
+              "overshoot_warm_bias_curve": "Overshoot warm-bias curve",
+              "overshoot_warm_bias_hysteresis_enabled": "Enable overshoot warm-bias hysteresis",
+              "overshoot_warm_bias_hysteresis": "Overshoot warm-bias hysteresis (°C)"
+            }
+          },
+          "advanced_seeds": {
+            "name": "Advanced: initial model estimates",
+            "data": {
+              "heat_loss_coefficient": "Heat loss coefficient (house inertia)",
+              "thermal_response_seed": "Initial thermal response (0 = light, 1 = heavy)",
+              "initial_indoor_temp": "Initial indoor temperature seed (optional)",
+              "initial_heat_loss_override": "Initial heat loss override (optional)",
+              "initial_heat_gain_coefficient": "Initial heat gain override (optional)"
+            }
+          },
+          "advanced_diagnostics": {
+            "name": "Advanced: diagnostics",
+            "data": {
+              "virtual_outdoor_trace_enabled": "Enable decision trace",
+              "performance_window_hours": "Performance window (hours)",
+              "learning_window_hours": "Learning window (hours)"
+            }
+          },
+          "advanced_summer": {
+            "name": "Advanced: summer low-price heat window",
+            "data": {
+              "summer_heat_window_enabled": "Enable summer low-price heat window",
+              "summer_heat_window_max_price": "Summer heat window max price",
+              "summer_heat_window_duration_minutes": "Summer heat window duration (minutes)",
+              "summer_heat_window_demand_window_hours": "Summer heat demand history window (hours)",
+              "summer_heat_window_max_heat_demand_ratio": "Summer heat max recent heat demand ratio",
+              "summer_heat_window_virtual_heat_offset": "Summer heat virtual outdoor offset (°C)"
+            }
+          },
+          "advanced_ufh": {
+            "name": "Advanced: UFH circulation pumps",
+            "data": {
+              "ufh_enabled": "Enable temperature-driven UFH pump control",
+              "ufh_supply_entity": "Heat-pump supply temperature sensor",
+              "ufh_switches": "UFH pump switches",
+              "ufh_on_temperature": "Start temperature",
+              "ufh_off_temperature": "Stop temperature",
+              "ufh_on_hold_seconds": "Continuously hot before starting",
+              "ufh_min_on_minutes": "Minimum heating runtime",
+              "ufh_min_off_minutes": "Minimum off time",
+              "ufh_overrun_minutes": "Continuously cold before stopping",
+              "ufh_stale_minutes": "Maximum sensor report age"
+            },
+            "data_description": {
+              "ufh_enabled": "Optional and off by default. Uses measured supply temperature only, even when Pilot HVAC is off. Monitor-only suppresses switch commands. Disable any existing automation controlling these switches before enabling.",
+              "ufh_supply_entity": "Unavailable or stale temperature holds pump states and reports a diagnostic fault.",
+              "ufh_switches": "Select individual pump switches for independent runtime and idle tracking. Disabling this feature leaves their current states unchanged."
+            }
+          },
+          "advanced_ufh_exercise": {
+            "name": "Advanced: UFH pump exercise",
+            "data": {
+              "ufh_exercise_enabled": "Enable independent daily pump exercise",
+              "ufh_exercise_time": "Exercise time (Home Assistant local time)",
+              "ufh_exercise_minutes": "Exercise duration",
+              "ufh_exercise_idle_hours": "Exercise only after this idle period"
+            },
+            "data_description": {
+              "ufh_exercise_enabled": "Independent of Summer Heating and electricity prices. Exercises only idle pumps. If useful warmth arrives, temperature control takes over. Requires UFH pump control to be enabled."
+            }
+          }
         }
       }
+    },
+    "error": {
+      "ufh_invalid_settings": "Check UFH durations, exercise time, and pump switch selections.",
+      "ufh_invalid_thresholds": "The UFH stop temperature must be lower than its start temperature.",
+      "ufh_missing_entities": "Select a supply temperature sensor and at least one UFH pump switch.",
+      "ufh_switch_conflict": "A UFH switch is already used by another Pilot controller or as this entry’s heat-pump output."
     }
   }
 }

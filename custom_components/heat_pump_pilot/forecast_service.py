@@ -24,9 +24,9 @@ except ModuleNotFoundError:  # pragma: no cover - local tests without HA
     dt_util = _DtUtilShim()
 
 try:
-    from .forecast_utils import align_forecast_to_now, extract_timed_temperatures, extract_timed_values
+    from .forecast_utils import align_forecast_to_now, extract_timed_temperatures, extract_timed_values, price_grid
 except ImportError:  # pragma: no cover - direct test imports
-    from forecast_utils import align_forecast_to_now, extract_timed_temperatures, extract_timed_values  # type: ignore
+    from forecast_utils import align_forecast_to_now, extract_timed_temperatures, extract_timed_values, price_grid  # type: ignore
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,6 +105,13 @@ class ForecastService:
             if "forecast" in attrs and not forecast:
                 forecast.extend(self._extract_price_list(attrs.get("forecast")))
 
+        if not self.last_price_timed_values and source == "attribute_forecast":
+            generic = attrs.get("prices") or attrs.get("forecast")
+            timed = extract_timed_values(generic)
+            if any(v.start is not None for v in timed):
+                self.last_price_timed_values = timed
+                forecast = align_forecast_to_now(timed, now)
+
         current_price = self._state_to_float(state.state)
         if current_price is not None and not forecast:
             forecast.append(current_price)
@@ -114,6 +121,30 @@ class ForecastService:
             source = "empty"
         self.last_price_forecast_source = source
         return forecast
+
+    def build_price_grid(self, now, steps: int, time_step_hours: float):
+        """Return the planner grid and known-only baseline grid, without cadence guessing."""
+        raw = self.extract_price_forecast(now)
+        state = self.hass.states.get(self._price_entity)
+        current = self._state_to_float(state.state) if state else None
+        if self.last_price_timed_values:
+            known = price_grid(self.last_price_timed_values, now, steps, time_step_hours)
+        elif self.last_price_forecast_source == "attribute_forecast":
+            # Untimed legacy lists have an explicit hourly convention. Preserve
+            # timestamps from dictionary attributes whenever they are supplied.
+            known = [raw[int(i * time_step_hours)] if int(i * time_step_hours) < len(raw) else None
+                     for i in range(steps)]
+        else:
+            known = [None] * steps
+        self.last_price_grid_known_steps = sum(v is not None for v in known)
+        self.last_price_grid_total_steps = steps
+        fallback = current if current is not None else 1.0
+        planned = []
+        for value in known:
+            if value is not None:
+                fallback = value
+            planned.append(fallback)
+        return planned, known
 
     async def build_outdoor_forecast(self, now, *, outdoor_temp: float | None) -> list[float]:
         """Collect outdoor temperature forecast."""
@@ -290,7 +321,7 @@ class ForecastService:
             if not isinstance(item, dict):
                 continue
 
-            value = item.get("value") or item.get("price") or item.get("average") or item.get("total")
+            value = next((item[k] for k in ("value", "price", "average", "total") if item.get(k) is not None), None)
             numeric = self._state_to_float(value)
             if numeric is not None:
                 prices.append(numeric)

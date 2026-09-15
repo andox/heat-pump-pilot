@@ -42,7 +42,7 @@ audited separately and are not converted into heating duty.
   controller, future weather forecasts, or financial savings.
 - All models share the same eligible origins at a given horizon. Horizons cannot
   cross gaps or validation/test boundaries. Overlapping origins are correlated.
-- Eleven models include recorded coefficients, temperature persistence, current
+- Models include recorded coefficients, temperature persistence, current
   EKF at fixed 15/60-minute intervals, slower parameter diffusion, hourly RLS,
   frozen/rolling regression, a background term, and heating-release lags.
 - Regression reuses the integration's loss/gain bounds. The extra background term
@@ -79,3 +79,52 @@ The tests include a check that changing future data cannot affect past fits.
 ```powershell
 .venv/Scripts/python.exe -B -m pytest -p no:cacheprovider tests/test_learning_analysis.py
 ```
+
+## Production adaptive model replay
+
+`adaptive_hourly` uses the integration's `LearningManager` and
+`AdaptiveThermalModel`, including interval collection, bounded parameter changes,
+background fitting and gain identification. It uses the same prepared 15-minute
+measured intervals as the other models. Minute ticks hold interval means; they
+create no temperature interpolation or extra coefficient updates. This checks
+production learning code on historical inputs, not HA's sensor-event plumbing.
+
+This candidate was added after inspecting the original dataset. It is excluded
+from the original model-selection procedure; its results are retrospective.
+Independent heating-season history is needed. This does not validate the new
+request-to-heating model, which needs actual number entity history and sufficient
+heating variation rather than just suggested output.
+
+With the supplied history and six-hour maximum hold, the initial implementation
+produced six-hour test MAE about 0.42°C versus 0.89°C for recorded coefficients
+(65 overlapping origins). Only 3.74 detected heating hours were available overall.
+With a stricter three-hour hold, the corresponding errors were 0.33°C versus
+0.87°C (54 origins). These runs have different coverage and are not independent
+datasets. This supports further temperature-prediction evaluation, not a claim of better
+heating-gain identification or electricity savings.
+
+Run all tests, including configuration schema tests:
+
+```powershell
+.venv/Scripts/python.exe -m pip install pytest voluptuous
+.venv/Scripts/python.exe -B -m pytest -p no:cacheprovider
+```
+
+Schema tests use real Voluptuous with stand-ins for HA flow plumbing/selectors.
+A live Home Assistant UI/reload smoke test remains necessary.
+
+## Performance score review
+
+Compare the old score definitions with the revised elapsed-time metrics using
+the extracted attribute history:
+
+```powershell
+.venv/Scripts/python.exe tools/review_performance.py data/pilot_attribute_history.json --hours 96 --tolerance 0.2
+```
+
+This reconstructs control observations from climate attributes emitted within
+60 seconds of their control timestamp, taking the first snapshot per control.
+It does not read the exact persisted performance samples. The report includes
+coverage, detected heating hours, cold/warm breakdowns, and both price scores.
+Observations are held for at most 15 minutes; long gaps remain unscored. Sparse
+heating observations limit what can be concluded about price optimization.

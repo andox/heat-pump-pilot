@@ -44,7 +44,7 @@ def test_merge_climate_options_normalizes_ranges_and_enums() -> None:
     assert merged[CONF_CONTINUOUS_CONTROL_WINDOW_HOURS] == pytest.approx(2.0)
     assert merged[CONF_COMFORT_TEMPERATURE_TOLERANCE] == pytest.approx(1.0)
     assert merged[CONF_HVAC_MODE] == "off"
-    assert merged[CONF_LEARNING_MODEL] == "ekf"
+    assert merged[CONF_LEARNING_MODEL] == "adaptive"
 
 
 def test_build_thermal_model_from_options_uses_rls_when_requested() -> None:

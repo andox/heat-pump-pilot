@@ -115,3 +115,23 @@ def test_build_outdoor_forecast_uses_weather_attribute_then_sensor_fallback() ->
     forecast = asyncio.run(service.build_outdoor_forecast(now, outdoor_temp=None))
     assert forecast == [5.0, 5.0, 5.0]
     assert service.last_outdoor_forecast_source == "outdoor_sensor_flat_fallback"
+
+
+def test_summer_scheduler_gets_exact_price_times_and_clears_stale_values():
+    now = datetime(2026, 7, 1, 12, 10, tzinfo=timezone.utc)
+    rows = [
+        {"start": "2026-07-01T12:00:00+00:00", "value": 0.2},
+        {"start": "2026-07-01T12:15:00+00:00", "value": 0.3},
+    ]
+    hass = _Hass({"sensor.price": _State("0.2", {"raw_today": rows})})
+    service = ForecastService(
+        hass, price_entity="sensor.price", weather_entity="weather.home",
+        outdoor_temp_entity="sensor.outdoor", prediction_horizon=24,
+        weather_forecast_cache_seconds=1800, weather_forecast_service_type="hourly",
+        state_to_float=_to_float,
+    )
+    service.extract_price_forecast(now)
+    assert [r.start.minute for r in service.last_price_timed_values] == [0, 15]
+    hass.states._states.clear()
+    assert service.extract_price_forecast(now) == []
+    assert service.last_price_timed_values == []

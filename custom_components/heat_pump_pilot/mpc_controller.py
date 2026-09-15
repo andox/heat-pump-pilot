@@ -51,6 +51,9 @@ class ControlResult:
     predicted_temperatures: list[float]
     cost: float
     price_baseline: float
+    duty_sequence: list[float] | None = None
+    predicted_heating: list[float] | None = None
+    planned_virtual_outdoor: list[float] | None = None
 
 
 @dataclass(slots=True)
@@ -77,6 +80,7 @@ class MpcController:
         time_step_hours: float = TIME_STEP_HOURS,
         heat_loss_coeff: float = HEAT_LOSS_COEFF,
         heat_gain_coeff: float = HEAT_GAIN_COEFF,
+        background_gain: float = 0.0,
         virtual_heat_offset: float = 0.0,
         overshoot_warm_bias_enabled: bool = False,
         overshoot_warm_bias_curve: str = "linear",
@@ -92,6 +96,7 @@ class MpcController:
         self.time_step_hours = time_step_hours
         self.heat_loss_coeff = heat_loss_coeff
         self.heat_gain_coeff = heat_gain_coeff
+        self.background_gain = background_gain
         self.virtual_heat_offset = virtual_heat_offset
         self.overshoot_warm_bias_enabled = overshoot_warm_bias_enabled
         self.overshoot_warm_bias_curve = overshoot_warm_bias_curve
@@ -108,6 +113,7 @@ class MpcController:
         prediction_horizon_hours: int | None = None,
         heat_loss_coeff: float | None = None,
         heat_gain_coeff: float | None = None,
+        background_gain: float | None = None,
         virtual_heat_offset: float | None = None,
         overshoot_warm_bias_enabled: bool | None = None,
         overshoot_warm_bias_curve: str | None = None,
@@ -131,6 +137,8 @@ class MpcController:
             self.heat_loss_coeff = heat_loss_coeff
         if heat_gain_coeff is not None:
             self.heat_gain_coeff = heat_gain_coeff
+        if background_gain is not None:
+            self.background_gain = background_gain
         if virtual_heat_offset is not None:
             self.virtual_heat_offset = virtual_heat_offset
         if overshoot_warm_bias_enabled is not None:
@@ -145,6 +153,7 @@ class MpcController:
         price_forecast: Sequence[float],
         past_prices: Sequence[float] | None = None,
         price_baseline_override: float | None = None,
+        response_context: tuple | None = None,
     ) -> tuple[bool, ControlResult | None]:
         """Return the recommended control action and the best simulation result."""
         steps = max(1, int(self.prediction_horizon_hours / self.time_step_hours))
@@ -158,14 +167,25 @@ class MpcController:
                 price_baseline = float(price_baseline_override)
             except (TypeError, ValueError):
                 price_baseline = None
-        if price_baseline is None or price_baseline <= 0:
-            baseline_pool = [p for p in prices if p is not None and p > 0]
+        if price_baseline is None or not math.isfinite(price_baseline) or price_baseline <= 0:
+            baseline_pool = [p for p in prices if p is not None and math.isfinite(p)]
             if past_prices:
-                baseline_pool.extend(p for p in past_prices if p is not None and p > 0)
+                baseline_pool.extend(p for p in past_prices if p is not None and math.isfinite(p))
             median_price = median(baseline_pool) if baseline_pool else max_price
             if median_price <= 0:
                 median_price = PRICE_BASELINE_FLOOR
             price_baseline = max(median_price, PRICE_BASELINE_FLOOR)
+
+        if response_context is not None and self.time_step_hours == 0.25:
+            try:
+                from .response_optimizer import optimize
+            except ImportError:
+                from response_optimizer import optimize
+            duties, predicted, heating, virtuals, cost = optimize(
+                self, indoor_temp, outdoor, prices, price_baseline, *response_context)
+            result = ControlResult([d > 0 for d in duties], predicted, cost, price_baseline,
+                                   duties, heating, virtuals)
+            return bool(duties and duties[0] > 0), result
 
         sequence, cost = self._optimize(indoor_temp, outdoor, prices, price_baseline, max_price)
         predicted = self._simulate_sequence(indoor_temp, outdoor, sequence)
@@ -184,7 +204,7 @@ class MpcController:
         """Predict indoor temperature for the next step."""
         delta = self.heat_loss_coeff * (outdoor_temp - indoor_temp) * self.time_step_hours
         heating_effect = self.heat_gain_coeff * heating_power * self.time_step_hours
-        return indoor_temp + delta + heating_effect
+        return indoor_temp + delta + heating_effect + self.background_gain * self.time_step_hours
 
     def _quantize_temp(self, temp: float) -> int:
         """Group nearby candidate temperatures without changing their state."""
