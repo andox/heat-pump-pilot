@@ -2285,7 +2285,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         if stale_after is None:
             return None, None
         try:
-            updated = dt_util.as_utc(state_obj.last_updated)
+            reported = getattr(state_obj, "last_reported", None)
+            updated = dt_util.as_utc(reported if reported is not None else state_obj.last_updated)
             now_utc = dt_util.as_utc(now)
         except (TypeError, ValueError, AttributeError):
             return None, None
@@ -2297,13 +2298,10 @@ class MpcHeatPumpClimate(ClimateEntity):
     def _collect_sensor_issues(self, now) -> list[tuple[str, str, float | None]]:
         """Collect issues for the sensors this integration depends on."""
         issues: list[tuple[str, str, float | None]] = []
-        # Many temperature sensors/entities only emit state updates when the value changes,
-        # so "last_updated" can be old even when the value is still reasonable to use.
-        # Prefer a long staleness window to avoid noisy false positives.
+        # Prefer report timestamps so unchanged readings remain fresh. Some
+        # devices only transmit changes, so allow quiet periods before warning.
         stale_required_temperature = timedelta(hours=6)
-        # Supply temperature is only used for heating detection; if it stops updating, the
-        # detection signal becomes unreliable relatively quickly.
-        stale_required_supply = timedelta(minutes=max(3 * int(self._control_interval), 60))
+        stale_required_supply = stale_required_temperature
 
         problem, age = self._entity_problem(self._indoor_temp_entity, now, stale_after=stale_required_temperature)
         if problem:
@@ -2327,6 +2325,20 @@ class MpcHeatPumpClimate(ClimateEntity):
             problem, age = self._entity_problem(self._controlled_entity, now, stale_after=None)
             if problem:
                 issues.append((self._controlled_entity, problem, age))
+
+        if self._options.get("ufh_enabled", False):
+            switches = self._options.get("ufh_switches", [])
+            if isinstance(switches, list):
+                checked = {entity_id for entity_id, _problem, _age in issues}
+                for entity_id in switches:
+                    if not isinstance(entity_id, str) or entity_id in checked:
+                        continue
+                    checked.add(entity_id)
+                    # A switch may legitimately remain off for days. Only
+                    # missing/unknown/unavailable states indicate a problem.
+                    problem, age = self._entity_problem(entity_id, now, stale_after=None)
+                    if problem:
+                        issues.append((entity_id, problem, age))
 
         return issues
 
@@ -2424,16 +2436,18 @@ class MpcHeatPumpClimate(ClimateEntity):
             sensor_issues = self._collect_sensor_issues(now)
         sensors_signature = None if not sensor_issues else "|".join(f"{eid}:{problem}" for (eid, problem, _age) in sensor_issues)
         if sensors_signature:
-            lines = ["One or more input entities are unavailable or stale:"]
+            lines = ["One or more input entities or pump switches are missing, unavailable or stale:"]
             for entity_id, problem, age in sensor_issues:
                 line = f"- {entity_id}: {problem}"
                 if problem == "stale":
                     age_text = self._format_age(age)
                     if age_text:
-                        line += f" (last updated {age_text} ago)"
+                        line += f" (last report/update {age_text} ago)"
                 lines.append(line)
             lines.append("")
             lines.append("The controller may fall back to less accurate data until this resolves.")
+            if self._options.get("ufh_enabled", False):
+                lines.append("Any listed UFH pump switch cannot be controlled while missing or unavailable; other available pumps remain under independent control.")
             messages["sensors"] = (f"{self._attr_name}: Sensor inputs", "\n".join(lines))
         updates.extend(
             tracker.update(
