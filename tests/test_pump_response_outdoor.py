@@ -145,3 +145,59 @@ def test_optimizer_and_replay_use_forecast_outdoor_for_delivery():
     assert plan.predicted_heating == pytest.approx(result[2])
     assert plan.predicted_temperatures == pytest.approx(result[1])
     assert plan.cost == pytest.approx(result[4])
+
+
+def test_restart_retains_parameters_and_rebuilds_live_state_with_real_timing():
+    from adaptive_model import AdaptiveThermalModel
+    from learning_manager import LearningManager
+    model = fit(samples())
+    saved = model.export_state()
+    manager = LearningManager(AdaptiveThermalModel())
+    manager.pump.restore(saved)
+    assert manager.pump.parameters == model.parameters
+    assert not manager.pump.ready
+    # Restart mid-bin: a fresh collector cannot produce a contiguous next bin.
+    start = model.history[-1][0] + 420
+    for minute in range(46):
+        manager.observe(start + minute * 60, 21, 5, 0.4, 0.5)
+        if minute < 30:
+            assert manager.response_state(start + minute * 60) is None
+    assert manager.pump.history[:len(model.history)] == model.history
+    assert manager.pump.ready, manager.pump.diagnostics()
+    assert manager.response_state(start + 45 * 60) is not None
+
+
+def test_fitting_never_uses_lags_or_heat_transitions_across_gaps():
+    first = list(samples(120))
+    second = [replace(r, end=r.end + first[-1].end + 7200) for r in samples(72)]
+    model = fit(first + second)
+    assert len(model.history) == 192
+    usable = model._usable_indices(model.history)
+    assert not set(range(120, 128)).intersection(usable)
+    assert 119 in usable and 128 in usable
+    assert model.ready, model.diagnostics()
+    assert model.parameters.delay_steps == 2
+    assert model.parameters.outdoor_gain == pytest.approx(0.25, abs=0.02)
+
+
+def test_error_reseeds_heat_after_gap():
+    rows = [(i * 900, 0, 0, 5) for i in range(20)]
+    rows += [(100000 + i * 900, 1, 1, 5) for i in range(20)]
+    assert PumpResponseModel._error(ResponseParameters(retention=0.9), rows, 8) == 0
+
+
+@pytest.mark.parametrize('parameters', [None, {'delay_steps': 99},
+    {'retention': 1}, {'slope': float('nan')}, {'idle': -1}])
+def test_invalid_saved_parameters_are_not_activated(parameters):
+    model = PumpResponseModel()
+    model.restore({'parameters': parameters})
+    assert model.parameters == ResponseParameters()
+    assert model.initial_state(0) is None
+
+
+def test_duplicate_observation_does_not_count_as_fresh_evidence():
+    row = next(samples())
+    model = PumpResponseModel()
+    model.add_interval(row)
+    model.add_interval(row)
+    assert len(model.history) == model.fresh_samples == 1

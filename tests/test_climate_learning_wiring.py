@@ -12,14 +12,16 @@ from adaptive_model import AdaptiveThermalModel
 from learning_manager import LearningManager
 from learning_utils import resolve_estimator_initial_temp, should_reseed_thermal_model
 from mpc_controller import MpcController
-from pump_response import virtual_request
+from pump_response import ResponseParameters, virtual_request
 from response_optimizer import VirtualActuator
 from runtime_settings import (
     build_runtime_settings,
     build_thermal_model_from_options,
     merge_climate_options,
 )
+from virtual_outdoor_utils import compute_virtual_outdoor_from_mpc_step, resolve_virtual_heat_offset
 from config_helpers import normalize_hvac_mode
+from control_request_utils import elapsed_smoothing_alpha, resolve_effective_heat_request, EffectiveHeatRequest
 
 
 def harness():
@@ -34,6 +36,14 @@ def harness():
         "_get_heating_detected",
         "_collect_learning",
         "_response_context",
+        "_request_elapsed_seconds",
+        "_request_increase_age",
+        "_apply_virtual_outdoor_smoothing",
+        "_build_effective_heat_request",
+        "_commit_effective_heat_request",
+        "_uses_virtual_outdoor_control",
+        "_compute_virtual_outdoor",
+        "_apply_virtual_outdoor_min_temp",
         "_handle_entry_update",
         "_apply_runtime_settings",
         "_learning_context",
@@ -49,6 +59,13 @@ def harness():
     namespace = dict(
         vars(const),
         virtual_request=virtual_request,
+        compute_virtual_outdoor_from_mpc_step=compute_virtual_outdoor_from_mpc_step,
+        resolve_virtual_heat_offset=resolve_virtual_heat_offset,
+        ResponseParameters=ResponseParameters,
+        elapsed_smoothing_alpha=elapsed_smoothing_alpha,
+        resolve_effective_heat_request=resolve_effective_heat_request,
+        EffectiveHeatRequest=EffectiveHeatRequest,
+        MAX_VIRTUAL_OUTDOOR=25.0,
         VirtualActuator=VirtualActuator,
         LearningManager=LearningManager,
         normalize_hvac_mode=normalize_hvac_mode,
@@ -82,6 +99,9 @@ def harness():
     instance._record_model_history = lambda now: None
     instance._continuous_control_enabled = True
     instance._control_interval = 15
+    instance._last_control_time = None
+    instance._effective_request_last_increase = None
+    instance._last_effective_requested_duty_ratio = None
     instance._virtual_outdoor_min_temp = -15
     instance._virtual_outdoor_smoothing_alpha = 0.5
     instance._virtual_outdoor_smoothing_enabled = True
@@ -178,8 +198,9 @@ def test_response_is_gated_by_operating_mode_and_measured_signal():
     entity._thermal_model.gain_identified = True
     pump.ready = True
     pump.history = [(now.timestamp(), 0.5, 0.5, 5.0)]
-    entity._get_heat_on_for_model = lambda now: 0.0
+    entity._get_heating_detected = lambda now: False
     assert entity._response_context(now) is not None
+    assert entity._response_context(now)[2].learned_response
     entity._monitor_only = True
     assert entity._response_context(now) is None
     entity._monitor_only = False
@@ -188,3 +209,88 @@ def test_response_is_gated_by_operating_mode_and_measured_signal():
     entity._control_interval = 15
     readings["sensor.outdoor"] = None
     assert entity._response_context(now) is None
+
+
+def test_pump_learning_uses_detector_while_house_margin_is_ambiguous():
+    entity, readings, _ = harness()
+    entity._heating_detection_active = lambda: True
+    entity._heating_supply_temp_entity = "sensor.supply"
+    entity._heating_supply_temp_threshold = 30
+    entity._learning_supply_temp_on_margin = 1
+    entity._learning_supply_temp_off_margin = 1
+    entity._get_heating_detected = lambda now: False
+    readings["sensor.supply"] = 29.5
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert entity._get_heat_on_for_model(now) is None
+    for minute in range(61):
+        entity._collect_learning(now + timedelta(minutes=minute))
+    assert len(entity._learning.pump.history) == 4
+    assert all(row[2] == 0 for row in entity._learning.pump.history)
+    assert entity._thermal_model.history == []
+
+
+def test_live_ramp_and_smoothing_match_planner_for_early_update():
+    entity, _, _ = harness()
+    now = datetime(2026, 9, 21, 12, tzinfo=timezone.utc)
+    entity._last_control_time = now - timedelta(seconds=60)
+    entity._effective_request_last_increase = now - timedelta(hours=1)
+    entity._last_effective_requested_duty_ratio = 0.0
+    entity._last_virtual_outdoor = 15.0
+    entity._virtual_outdoor_smoothing_alpha = 0.8
+    entity._target_temperature = 21
+    entity._comfort_tolerance = 0.3
+    entity._controller.target_temperature = 21
+    entity._controller.comfort_temperature_tolerance = 0.3
+    actual = entity._build_effective_heat_request(
+        raw_heat_on=True, raw_duty_ratio=1, predicted_temp=21, now=now)
+    actuator = VirtualActuator(10, -15, 0.8, 15, initial_duty=0,
+                              first_elapsed_seconds=60, anti_chatter=True)
+    expected = actuator.request(entity._controller, 1, 0, 21, 60, 3600)
+    assert actual.effective_requested_duty_ratio == pytest.approx(expected)
+    raw = 5 + 10 * (1 - 2 * expected)
+    live = entity._apply_virtual_outdoor_smoothing(raw, base=5, offset=10, now=now)
+    planned = actuator.value(entity._controller, 5, 1, 1, 21, expected, 15, 60)
+    assert live == pytest.approx(planned)
+    entity._commit_effective_heat_request(actual, now=now)
+    assert entity._effective_request_last_increase == now
+    assert entity._request_increase_age(now + timedelta(seconds=30)) == 30
+
+
+def test_unlearned_fallback_still_plans_actual_virtual_commands():
+    entity, _, _ = harness()
+    now = datetime(2026, 9, 21, 12, tzinfo=timezone.utc)
+    entity._thermal_model.gain_identified = False
+    context = entity._response_context(now)
+    assert context is not None
+    assert context[2].learned_response is False
+    assert context[2].anti_chatter is False
+    assert context[0] == ResponseParameters()
+    assert not entity._learning.pump.ready
+
+
+def test_main_planner_request_is_not_rewritten_by_legacy_anti_chatter():
+    entity, _, _ = harness()
+    now = datetime(2026, 9, 21, 12, tzinfo=timezone.utc)
+    entity._last_result = SimpleNamespace(duty_sequence=[0.0])
+    entity._last_effective_requested_duty_ratio = 1.0
+    entity._effective_request_last_increase = now
+    entity._last_control_time = now - timedelta(seconds=20)
+    entity._target_temperature = 21
+    entity._comfort_tolerance = 1.2
+    result = entity._build_effective_heat_request(raw_heat_on=False, raw_duty_ratio=0,
+                                                 predicted_temp=21, now=now)
+    assert result.effective_requested_duty_ratio == 0
+    assert result.anti_chatter_limited is False
+
+
+def test_live_output_uses_exact_planned_command_without_extra_backoff():
+    entity, _, _ = harness()
+    entity._outdoor_temp, entity._indoor_temp = 10, 21.3
+    entity._last_result = SimpleNamespace(predicted_temperatures=[21.3,21.4],
+        price_baseline=1, planned_virtual_outdoor=[3.5], duty_sequence=[0.75])
+    entity._last_price_forecast = [0.1]
+    entity._price_comfort_weight, entity._price_penalty_curve = 0.8, "linear"
+    entity._target_temperature, entity._comfort_tolerance = 20.5, 1.2
+    entity._overshoot_warm_bias_enabled, entity._overshoot_warm_bias_curve = True, "linear"
+    entity._apply_virtual_outdoor_smoothing = lambda *a, **kw: pytest.fail("Double smoothing")
+    assert entity._compute_virtual_outdoor(True, [10], duty_ratio=0.75) == 3.5

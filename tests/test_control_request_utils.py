@@ -27,7 +27,7 @@ def test_continuous_request_state_exposes_partial_request() -> None:
     result = resolve_effective_heat_request(
         raw_requested_duty_ratio=0.25,
         previous_effective_duty_ratio=None,
-        previous_same_ratio_runs=0,
+        elapsed_seconds=900, seconds_since_increase=900,
         predicted_temp=20.8,
         target_temperature=21.0,
         comfort_tolerance=1.0,
@@ -38,38 +38,67 @@ def test_continuous_request_state_exposes_partial_request() -> None:
     assert result.effective_heat_request_state == HEAT_REQUEST_STATE_LOW
 
 
-def test_anti_chatter_limits_alternating_nighttime_requests() -> None:
-    previous_ratio = None
-    previous_runs = 0
-    effective = []
-    limited_flags = []
-    for raw_ratio in (1.0, 0.0, 1.0, 0.0):
-        result = resolve_effective_heat_request(
-            raw_requested_duty_ratio=raw_ratio,
-            previous_effective_duty_ratio=previous_ratio,
-            previous_same_ratio_runs=previous_runs,
-            predicted_temp=20.6,
-            target_temperature=21.0,
-            comfort_tolerance=1.0,
-            anti_chatter_enabled=True,
-        )
-        effective.append(result.effective_requested_duty_ratio)
-        limited_flags.append(result.anti_chatter_limited)
-        if previous_ratio is not None and abs(previous_ratio - result.effective_requested_duty_ratio) < 1e-6:
-            previous_runs += 1
-        else:
-            previous_runs = 1
-        previous_ratio = result.effective_requested_duty_ratio
+def request(desired, previous, elapsed, age, predicted=21):
+    return resolve_effective_heat_request(
+        raw_requested_duty_ratio=desired, previous_effective_duty_ratio=previous,
+        elapsed_seconds=elapsed, seconds_since_increase=age,
+        predicted_temp=predicted, target_temperature=21, comfort_tolerance=0.3,
+        anti_chatter_enabled=True,
+    )
 
-    assert effective == [1.0, 1.0, 1.0, 0.75]
-    assert limited_flags == [False, True, False, True]
+
+def test_frequent_events_do_not_accelerate_ramp():
+    previous = 0.0
+    for _ in range(15):
+        previous = request(1, previous, 60, 0).effective_requested_duty_ratio
+    assert previous == pytest.approx(request(1, 0, 900, 0).effective_requested_duty_ratio)
+    assert previous == pytest.approx(0.25)
+
+
+def test_reversal_hold_uses_time_not_event_count():
+    for age in range(0, 901, 30):
+        result = request(0, 0.75, 30, age)
+        assert result.effective_requested_duty_ratio == 0.75
+        assert result.anti_chatter_reason == "minimum_persistence"
+    assert request(0, 0.75, 60, 960).effective_requested_duty_ratio == pytest.approx(0.75 - 0.25 / 15)
+
+
+def test_down_ramp_is_independent_of_event_count_after_hold():
+    previous = 0.75
+    for age in range(60, 1801, 60):
+        previous = request(0, previous, 60, age).effective_requested_duty_ratio
+    assert previous == pytest.approx(request(0, 0.75, 1800, 1800).effective_requested_duty_ratio)
+    assert previous == pytest.approx(0.5)
+
+
+def test_warm_house_can_back_off_without_waiting():
+    assert request(0, 1, 10, 10, predicted=21.4).effective_requested_duty_ratio == 0
+
+
+def test_no_time_does_not_advance_normal_ramp():
+    assert request(1, 0, 0, 0).effective_requested_duty_ratio == 0
+
+
+def test_small_fractional_requests_are_not_rounded_to_quarters():
+    assert request(0.11, 0, 900, 900).effective_requested_duty_ratio == pytest.approx(0.11)
+
+
+def test_ema_is_independent_of_event_count():
+    from control_request_utils import elapsed_smoothing_alpha
+    value = 5.0
+    for _ in range(15):
+        value += elapsed_smoothing_alpha(0.8, 60, 900) * (15 - value)
+    assert value == pytest.approx(13)
+    assert elapsed_smoothing_alpha(0.8, 0, 900) == 0
+    assert elapsed_smoothing_alpha(0, 900, 900) == 0
+    assert elapsed_smoothing_alpha(1, 60, 900) == 1
 
 
 def test_anti_chatter_allows_fast_comfort_recovery() -> None:
     result = resolve_effective_heat_request(
         raw_requested_duty_ratio=1.0,
         previous_effective_duty_ratio=0.0,
-        previous_same_ratio_runs=4,
+        elapsed_seconds=900, seconds_since_increase=3600,
         predicted_temp=20.0,
         target_temperature=21.0,
         comfort_tolerance=0.5,

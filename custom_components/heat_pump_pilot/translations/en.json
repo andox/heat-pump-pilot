@@ -41,8 +41,8 @@
         "description": "Tune the predictive controller behaviour.",
         "data": {
           "target_temperature": "Target indoor temperature",
-          "price_comfort_weight": "Price priority (0 = comfort, 1 = price)",
-          "comfort_temperature_tolerance": "Comfort tolerance (°C)",
+          "price_comfort_weight": "Price vs comfort (0 = target, 1 = lowest cost within band)",
+          "comfort_temperature_tolerance": "Allowed temperature range (+/- °C from target)",
           "monitor_only": "Monitor only (do not send control commands)"
         },
         "sections": {
@@ -63,13 +63,18 @@
             "name": "Advanced: control and virtual outdoor temperature",
             "data": {
               "continuous_control_enabled": "Enable continuous control mode",
-              "continuous_control_window_hours": "Continuous control window (hours)",
+              "continuous_control_window_hours": "Heat-request averaging window (hours)",
               "control_interval_minutes": "Control interval (minutes)",
               "prediction_horizon_hours": "Prediction horizon (hours)",
               "virtual_outdoor_heat_offset": "Virtual outdoor swing range (°C)",
               "virtual_outdoor_min_temp": "Virtual outdoor minimum (°C)",
               "virtual_outdoor_smoothing_enabled": "Enable virtual outdoor smoothing",
-              "virtual_outdoor_smoothing_alpha": "Virtual outdoor smoothing alpha (EMA)"
+              "virtual_outdoor_smoothing_alpha": "Output responsiveness (0-1; higher is faster)"
+            },
+            "data_description": {
+              "continuous_control_window_hours": "Only used by legacy binary planning modes; the normal number-output planner chooses request strength directly.",
+              "virtual_outdoor_smoothing_enabled": "Gradually changes the command sent to the heat pump. The command-aware planner includes this delay in its prediction.",
+              "virtual_outdoor_smoothing_alpha": "Fraction of the remaining change applied per normal control interval, regardless of sensor update frequency. 0.5 moves halfway; 1 disables output smoothing. Used only when smoothing is enabled."
             }
           },
           "advanced_prices": {
@@ -176,6 +181,10 @@
               "ufh_exercise_enabled": "Independent of Summer Heating and electricity prices. Exercises only idle pumps. If useful warmth arrives, temperature control takes over. Requires UFH pump control to be enabled."
             }
           }
+        },
+        "data_description": {
+          "price_comfort_weight": "Among plans that best respect the temperature band, higher values favor cheaper heating and coasting; lower values keep closer to target. This is not a percentage of savings.",
+          "comfort_temperature_tolerance": "Used on both sides of target. For target 20.5 and tolerance 1.2, the predicted allowed range is 19.3 to 21.7. Preheating above target is allowed, not required. Forecasts cannot guarantee actual temperature."
         }
       }
     },

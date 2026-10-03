@@ -955,7 +955,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 extra[vol.Required(key, default=value)] = selector.TimeSelector()
             else:
                 extra[vol.Required(key, default=value)] = selector.BooleanSelector()
-        return group_schema(vol.Schema({**flat.schema, **extra}))
+        # Legacy warm-bias settings remain readable in stored options, but no
+        # longer compete with the planner or appear as active tuning controls.
+        fields = {marker: validator for marker, validator in {**flat.schema, **extra}.items()
+                  if not str(marker.schema).startswith("overshoot_warm_bias")}
+        command_planner = (
+            str(current_data.get(CONF_CONTROLLED_ENTITY, "")).startswith("number.")
+            and options.get(CONF_CONTINUOUS_CONTROL_ENABLED, DEFAULT_CONTINUOUS_CONTROL_ENABLED)
+            and float(options.get(CONF_CONTROL_INTERVAL_MINUTES, DEFAULT_CONTROL_INTERVAL_MINUTES)) == 15
+        )
+        if command_planner:
+            fields = {marker: validator for marker, validator in fields.items()
+                      if marker.schema != CONF_CONTINUOUS_CONTROL_WINDOW_HOURS}
+        return group_schema(vol.Schema(fields))
 
 
 def group_schema(flat):

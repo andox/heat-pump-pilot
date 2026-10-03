@@ -258,3 +258,19 @@ def test_ufh_missing_entities_and_reversed_thresholds_rejected():
     inputs['advanced_ufh'].update(ufh_supply_entity='sensor.supply',ufh_switches=['switch.a'],ufh_on_temperature=20,ufh_off_temperature=25)
     result=asyncio.run(flow.async_step_init(inputs))
     assert result['errors']['base']=='ufh_invalid_thresholds'
+
+
+def test_unified_planner_hides_competing_bias_and_averaging_controls():
+    configured = entry()
+    configured.options.update(continuous_control_enabled=True, control_interval_minutes=15,
+                              overshoot_warm_bias_enabled=True, continuous_control_window_hours=3)
+    flow = load_flow()(configured)
+    visible = initial_form_data(flow._build_options_schema())
+    assert "price_comfort_weight" in visible
+    assert "comfort_temperature_tolerance" in visible
+    assert "advanced_overshoot" not in visible
+    assert "continuous_control_window_hours" not in visible["advanced_control"]
+    # Hiding a retired field must not erase existing options on save.
+    flat = flatten_input(visible, configured.options)
+    assert flat["overshoot_warm_bias_enabled"] is True
+    assert flat["continuous_control_window_hours"] == 3

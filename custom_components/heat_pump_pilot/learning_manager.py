@@ -14,27 +14,34 @@ except ImportError:
     from learning_math import finite
 
 
+_USE_HOUSE_HEAT = object()
+
+
 class LearningManager:
     def __init__(self, model, minutes=60):
         self.model = model
         self.house = IntervalCollector(minutes)
-        self.pump_intervals = IntervalCollector(15)
+        self.pump_intervals = IntervalCollector(15, require_indoor=False)
         self.pump = PumpResponseModel()
         self.last_update = None
         self.recent = deque()
 
-    def observe(self, now, indoor, outdoor, heat, request=None):
+    def observe(self, now, indoor, outdoor, heat, request=None, *, pump_heat=_USE_HOUSE_HEAT):
         """Return true only when a complete house interval was consumed."""
+        # Pump response learns the measured detector's transitions, including
+        # its debounce. House learning can use stricter supply margins.
+        if pump_heat is _USE_HOUSE_HEAT:
+            pump_heat = heat
         # Keep actual observation edges to align delayed state at arbitrary
         # sensor-triggered control times, not only at a completed bin boundary.
         if self.recent and (now < self.recent[-1][0] or now - self.recent[-1][0] > 300):
             self.recent.clear()
         if self.recent and now == self.recent[-1][0]:
             self.recent.pop()
-        self.recent.append((now, finite(request), finite(heat)))
+        self.recent.append((now, finite(request), finite(pump_heat)))
         while len(self.recent) > 1 and self.recent[1][0] <= now - 8100:
             self.recent.popleft()
-        pump_sample = self.pump_intervals.observe(now, indoor, outdoor, heat, request)
+        pump_sample = self.pump_intervals.observe(now, indoor, outdoor, pump_heat, request)
         if pump_sample is not None:
             self.pump.add_interval(pump_sample)
         elif self.pump_intervals.last_status in (

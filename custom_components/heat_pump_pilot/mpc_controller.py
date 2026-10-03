@@ -24,10 +24,6 @@ except ImportError:  # pragma: no cover - allow direct module imports in tests
         PRICE_PENALTY_CURVES,
         PRICE_RATIO_MIN,
     )
-try:
-    from .virtual_outdoor_utils import compute_overshoot_warm_bias
-except ImportError:  # pragma: no cover - allow direct module imports in tests
-    from virtual_outdoor_utils import compute_overshoot_warm_bias
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +50,9 @@ class ControlResult:
     duty_sequence: list[float] | None = None
     predicted_heating: list[float] | None = None
     planned_virtual_outdoor: list[float] | None = None
+    response_model_source: str | None = None
+    comfort_violation_degree_hours: float = 0.0
+    comfort_status: str = "within_band"
 
 
 @dataclass(slots=True)
@@ -64,6 +63,7 @@ class _PlanNode:
     cost: float
     action: bool | None
     previous: _PlanNode | None
+    violation: float = 0.0
 
 
 class MpcController:
@@ -184,7 +184,9 @@ class MpcController:
             duties, predicted, heating, virtuals, cost = optimize(
                 self, indoor_temp, outdoor, prices, price_baseline, *response_context)
             result = ControlResult([d > 0 for d in duties], predicted, cost, price_baseline,
-                                   duties, heating, virtuals)
+                                   duties, heating, virtuals,
+                                   "learned" if response_context[2].learned_response else "fallback")
+            self.update_comfort_diagnostics(result)
             return bool(duties and duties[0] > 0), result
 
         sequence, cost = self._optimize(indoor_temp, outdoor, prices, price_baseline, max_price)
@@ -196,6 +198,7 @@ class MpcController:
             cost=cost,
             price_baseline=price_baseline,
         )
+        self.update_comfort_diagnostics(result)
         if not sequence:
             return False, result
         return bool(sequence[0]), result
@@ -260,26 +263,22 @@ class MpcController:
                 * self.time_step_hours
             )
             for node in candidates.values():
-                comfort_cost = (
-                    (1.0 - self.price_comfort_weight)
-                    * self._comfort_penalty(node.temperature)
-                    * self.time_step_hours
-                )
                 for action in (False, True):
-                    toggle_cost = (
-                        TOGGLE_PENALTY
-                        if node.action is not None and node.action != action
-                        else 0.0
-                    )
-                    cost = node.cost + comfort_cost + (heating_cost if action else 0.0) + toggle_cost
                     next_temp = self._predict_temp(node.temperature, outdoor_temp, float(action))
+                    comfort_cost = (
+                        (1.0 - self.price_comfort_weight)
+                        * self._comfort_penalty(next_temp) * self.time_step_hours
+                    )
+                    toggle_cost = TOGGLE_PENALTY if node.action is not None and node.action != action else 0.0
+                    cost = node.cost + comfort_cost + (heating_cost if action else 0.0) + toggle_cost
+                    violation = node.violation + self._band_violation(next_temp) * self.time_step_hours
                     key = (self._quantize_temp(next_temp), action)
                     incumbent = next_candidates.get(key)
-                    if incumbent is None or cost < incumbent.cost:
-                        next_candidates[key] = _PlanNode(next_temp, cost, action, node)
+                    if incumbent is None or (violation, cost) < (incumbent.violation, incumbent.cost):
+                        next_candidates[key] = _PlanNode(next_temp, cost, action, node, violation)
             candidates = next_candidates
 
-        best = min(candidates.values(), key=lambda node: node.cost)
+        best = min(candidates.values(), key=lambda node: (node.violation, node.cost))
         cost = best.cost
         path: list[bool] = []
         while best.previous is not None:
@@ -288,21 +287,31 @@ class MpcController:
         path.reverse()
         return path, cost
 
+    def _band_violation(self, temp: float) -> float:
+        """Temperature outside the allowed band, independent of price weight."""
+        return max(0.0, abs(temp - self.target_temperature) - self.comfort_temperature_tolerance)
+
     def _comfort_penalty(self, temp: float) -> float:
-        """Compute comfort penalty with optional above-target bias."""
-        delta = temp - self.target_temperature
-        penalty = max(0.0, abs(delta) - self.comfort_temperature_tolerance)
-        if penalty <= 0.0 or not self.overshoot_warm_bias_enabled:
-            return penalty
-        if delta <= 0.0:
-            return penalty
-        _, multiplier, _, _ = compute_overshoot_warm_bias(
-            delta,
-            self.comfort_temperature_tolerance,
-            self.virtual_heat_offset,
-            self.overshoot_warm_bias_curve,
+        """Preference for the target within the band; no separate warm-side bias.
+
+        One band-width from target costs one normalized comfort unit per hour.
+        Price and comfort are preferences among equally feasible plans, not a
+        mechanism for buying permission to breach the band.
+        """
+        scale = max(0.2, self.comfort_temperature_tolerance)
+        return ((temp - self.target_temperature) / scale) ** 2
+
+    def update_comfort_diagnostics(self, result: ControlResult) -> None:
+        # Include the terminal temperature; the measured initial state cannot be
+        # changed retroactively and is not scored as a planning choice.
+        result.comfort_violation_degree_hours = sum(
+            self._band_violation(t) * self.time_step_hours
+            for t in result.predicted_temperatures[1:]
         )
-        return penalty * multiplier
+        result.comfort_status = (
+            "within_band" if result.comfort_violation_degree_hours < 1e-8
+            else "predicted_breach"
+        )
 
     def _simulate_sequence(self, indoor_temp: float, outdoor: Sequence[float], sequence: Sequence[bool]) -> list[float]:
         """Simulate temperatures for a chosen sequence.

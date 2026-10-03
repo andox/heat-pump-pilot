@@ -14,8 +14,8 @@ except ImportError:
 class LearningInterval:
     end: float
     hours: float
-    start_temp: float
-    end_temp: float
+    start_temp: float | None
+    end_temp: float | None
     outdoor: float
     heat: float
     request: float | None
@@ -30,8 +30,9 @@ class IntervalCollector:
     time is not treated as zero heating or silently normalized to a full interval.
     """
 
-    def __init__(self, minutes=60):
+    def __init__(self, minutes=60, *, require_indoor=True):
         self.seconds = minutes * 60
+        self.require_indoor = require_indoor
         self.reset()
         self.last_status = "waiting_for_interval"
         self.last_coverage = 0.0
@@ -61,7 +62,7 @@ class IntervalCollector:
             dt = now - self.last
             old_indoor, old_outdoor, old_heat, old_request = self.previous
             if (
-                old_indoor is not None
+                (not self.require_indoor or old_indoor is not None)
                 and old_outdoor is not None
                 and old_heat is not None
             ):
@@ -79,12 +80,15 @@ class IntervalCollector:
         self.last_coverage = coverage
         result = None
         if (
-            self.start_temp is not None
+            self.require_indoor
+            and self.start_temp is not None
             and indoor is not None
             and abs(indoor - self.start_temp) > 2 * duration / 3600
         ):
             self.last_status = "temperature_jump"
-        elif coverage >= 0.95 and self.start_temp is not None and indoor is not None:
+        elif coverage >= 0.95 and (
+            not self.require_indoor or (self.start_temp is not None and indoor is not None)
+        ):
             result = LearningInterval(
                 now,
                 duration / 3600,

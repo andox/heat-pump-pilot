@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-ANTI_CHATTER_MIN_PERSISTENCE_RUNS = 2
+ANTI_CHATTER_REFERENCE_SECONDS = 15 * 60
 ANTI_CHATTER_MAX_STEP_CHANGE = 0.25
 ANTI_CHATTER_COMFORT_RECOVERY_DELTA = 0.4
 
@@ -36,7 +36,8 @@ def resolve_effective_heat_request(
     *,
     raw_requested_duty_ratio: float | None,
     previous_effective_duty_ratio: float | None,
-    previous_same_ratio_runs: int,
+    elapsed_seconds: float,
+    seconds_since_increase: float,
     predicted_temp: float | None,
     target_temperature: float,
     comfort_tolerance: float,
@@ -45,9 +46,9 @@ def resolve_effective_heat_request(
     """Return an effective duty ratio after internal anti-chatter limiting."""
 
     raw_ratio = normalize_requested_duty_ratio(raw_requested_duty_ratio, fallback=0.0)
-    desired_ratio = quantize_requested_duty_ratio(raw_ratio)
+    desired_ratio = raw_ratio
     previous_ratio = (
-        quantize_requested_duty_ratio(previous_effective_duty_ratio)
+        normalize_requested_duty_ratio(previous_effective_duty_ratio, fallback=0.0)
         if previous_effective_duty_ratio is not None
         else None
     )
@@ -74,25 +75,30 @@ def resolve_effective_heat_request(
             anti_chatter_reason=None,
         )
 
+    # A quarter of the request range per 15 minutes, independent of event count.
+    elapsed = max(0.0, elapsed_seconds)
+    step = ANTI_CHATTER_MAX_STEP_CHANGE * elapsed / ANTI_CHATTER_REFERENCE_SECONDS
     effective_ratio = desired_ratio
     limited = False
     reason = None
-    if desired_ratio < previous_ratio and previous_same_ratio_runs < ANTI_CHATTER_MIN_PERSISTENCE_RUNS:
-        effective_ratio = previous_ratio
+    too_warm = predicted_temp is not None and predicted_temp > target_temperature + comfort_tolerance
+    if desired_ratio < previous_ratio and not too_warm:
+        # Only the part of this interval after the hold expires is available
+        # for ramping down. Repeated events cannot consume the hold early.
+        available = max(0.0, seconds_since_increase - ANTI_CHATTER_REFERENCE_SECONDS)
+        step = ANTI_CHATTER_MAX_STEP_CHANGE * min(elapsed, available) / ANTI_CHATTER_REFERENCE_SECONDS
+        if step == 0:
+            effective_ratio = previous_ratio
+            limited = True
+            reason = "minimum_persistence"
+    if too_warm and desired_ratio < previous_ratio:
+        step = 1.0  # Do not prolong a heat request above the comfort band.
+    delta = desired_ratio - previous_ratio
+    if not limited and abs(delta) > step:
+        effective_ratio = previous_ratio + (step if delta > 0 else -step)
         limited = True
-        reason = "minimum_persistence"
-    else:
-        delta = desired_ratio - previous_ratio
-        if delta > ANTI_CHATTER_MAX_STEP_CHANGE:
-            effective_ratio = previous_ratio + ANTI_CHATTER_MAX_STEP_CHANGE
-            limited = True
-            reason = "ramp_up_limited"
-        elif delta < -ANTI_CHATTER_MAX_STEP_CHANGE:
-            effective_ratio = previous_ratio - ANTI_CHATTER_MAX_STEP_CHANGE
-            limited = True
-            reason = "ramp_down_limited"
+        reason = "ramp_up_limited" if delta > 0 else "ramp_down_limited"
 
-    effective_ratio = quantize_requested_duty_ratio(effective_ratio)
     return EffectiveHeatRequest(
         raw_requested_duty_ratio=raw_ratio,
         effective_requested_duty_ratio=effective_ratio,
@@ -172,13 +178,6 @@ def normalize_requested_duty_ratio(value: float | None, *, fallback: float) -> f
     return max(0.0, min(1.0, ratio))
 
 
-def quantize_requested_duty_ratio(value: float | None) -> float:
-    """Quantize duty ratio to quarter-step buckets for stable request states."""
-
-    ratio = normalize_requested_duty_ratio(value, fallback=0.0)
-    return max(0.0, min(1.0, round(ratio * 4) / 4))
-
-
 def _comfort_recovery_active(
     *,
     predicted_temp: float | None,
@@ -195,3 +194,11 @@ def _comfort_recovery_active(
         return False
     shortfall = target - predicted
     return shortfall > max(ANTI_CHATTER_COMFORT_RECOVERY_DELTA, tolerance * 0.5)
+
+
+def elapsed_smoothing_alpha(alpha: float, elapsed_seconds: float, reference_seconds: float) -> float:
+    """Interpret alpha per normal control interval, not per sensor event."""
+    alpha = max(0.0, min(1.0, alpha))
+    if elapsed_seconds <= 0:
+        return 0.0
+    return 1.0 - (1.0 - alpha) ** (elapsed_seconds / max(1.0, reference_seconds))

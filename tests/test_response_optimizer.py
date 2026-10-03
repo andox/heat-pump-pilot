@@ -68,3 +68,40 @@ def test_direct_controller_fallback_has_no_response_forecast():
     _, result = controller().suggest_control(20, [5], [1])
     assert result.duty_sequence is None
     assert result.predicted_heating is None
+
+
+def test_first_change_penalty_starts_from_current_request():
+    from response_optimizer import optimize
+    # Flat thermal/electricity costs isolate the change penalty.
+    mpc = controller(heat_loss_coeff=0, heat_gain_coeff=0, background_gain=0, price_comfort_weight=0)
+    context = (ResponseParameters(0, 0, 0, 0), (0, ()),
+               VirtualActuator(10, -15, 1, 5, initial_duty=0.75))
+    plan = optimize(mpc, 21, [5], [1], 1, *context)
+    assert plan[0] == [0.75]
+    changed = replay(mpc, 21, [5], [1], 1, [0], *context)
+    assert changed[-1] - plan[-1] == pytest.approx(0.05 * 0.75)
+
+
+def test_response_plan_models_elapsed_ramp_and_smoothing():
+    from response_optimizer import optimize
+    mpc = controller()
+    actuator = VirtualActuator(10, -15, 0.8, 15, initial_duty=0,
+                              first_elapsed_seconds=60, anti_chatter=True)
+    context = (ResponseParameters(0, 0, 0.8, 0), (0, ()), actuator)
+    plan = optimize(mpc, 21, [5]*4, [1]*4, 1, *context)
+    assert plan[0][0] <= 0.25 / 15
+    assert replay(mpc, 21, [5]*4, [1]*4, 1, plan[0], *context) == plan
+    # Hold expiry halfway through a control interval only allows half a ramp.
+    assert actuator.request(mpc, 0, 1, 21, 900, 1350) == pytest.approx(0.875)
+    expected = 15 + (1 - 0.2**(60/900)) * (5-15)
+    assert actuator.value(mpc, 5, 1, 1, 21, 0.5, 15, 60) == pytest.approx(expected)
+
+
+def test_replay_keeps_applied_first_request_then_limits_future_requests():
+    mpc = controller()
+    context = (ResponseParameters(0, 0, 0.8, 0), (0, ()),
+               VirtualActuator(10, -15, 0.8, 15, initial_duty=0,
+                               first_elapsed_seconds=60, anti_chatter=True))
+    plan = replay(mpc, 21, [5]*3, [1]*3, 1, [1, 0, 0], *context, first_virtual=-5)
+    assert plan[0] == pytest.approx([1, 1, 0.75])
+    assert plan[3][0] == -5

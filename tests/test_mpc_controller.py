@@ -190,11 +190,12 @@ def test_mpc_does_not_heat_when_comfort_already_satisfied() -> None:
     assert result is not None
     assert action is False
     assert result.sequence[0] is False
-    assert result.cost == 0.0
+    assert result.comfort_status == "within_band"
+    assert not any(result.sequence)
 
 
-def test_price_comfort_weight_changes_optimal_first_action() -> None:
-    """The price/comfort weight must influence the optimization outcome."""
+def test_price_weight_cannot_override_recovery_from_below_band() -> None:
+    """Even pure price preference must recover an avoidable temperature breach."""
     indoor_temp = 19.0
     outdoor_forecast = [19.0, 19.0]  # No heat loss term when equal to indoor.
     price_forecast = [10.0, 1.0]  # Expensive now, cheap later.
@@ -221,7 +222,7 @@ def test_price_comfort_weight_changes_optimal_first_action() -> None:
         heat_gain_coeff=1.0,
     )
     action_price, _ = price_first.suggest_control(indoor_temp, outdoor_forecast, price_forecast)
-    assert action_price is False
+    assert action_price is True  # Price cannot buy an avoidable breach.
 
 
 def test_negative_prices_are_bounded_in_cost() -> None:
@@ -244,8 +245,8 @@ def test_negative_prices_are_bounded_in_cost() -> None:
     assert result.cost == -2.0
 
 
-def test_overshoot_bias_increases_above_target_penalty() -> None:
-    """Above-target penalty should increase when overshoot warm bias is enabled."""
+def test_legacy_overshoot_option_does_not_compete_with_planner() -> None:
+    """Legacy warm-side bias must no longer fight intentional preheating."""
     with_bias = MpcController(
         target_temperature=20.0,
         price_comfort_weight=0.5,
@@ -272,7 +273,7 @@ def test_overshoot_bias_increases_above_target_penalty() -> None:
     )
 
     assert with_bias._comfort_penalty(19.0) == without_bias._comfort_penalty(19.0)
-    assert with_bias._comfort_penalty(21.0) > without_bias._comfort_penalty(21.0)
+    assert with_bias._comfort_penalty(21.0) == without_bias._comfort_penalty(21.0)
 
 
 def _unrounded_cost(controller, indoor, outdoor, prices, sequence):
@@ -281,14 +282,15 @@ def _unrounded_cost(controller, indoor, outdoor, prices, sequence):
     total = 0.0
     previous = None
     for ambient, price, action in zip(outdoor, prices, sequence):
-        error = max(0.0, abs(temp - controller.target_temperature) - controller.comfort_temperature_tolerance)
+        temp += controller.time_step_hours * (
+            controller.heat_loss_coeff * (ambient - temp) + controller.heat_gain_coeff * action
+            + controller.background_gain
+        )
+        error = ((temp - controller.target_temperature) / max(0.2, controller.comfort_temperature_tolerance)) ** 2
         total += (1.0 - controller.price_comfort_weight) * error * controller.time_step_hours
         total += controller.price_comfort_weight * price * action * controller.time_step_hours
         if previous is not None and previous != action:
             total += 0.05
-        temp += controller.time_step_hours * (
-            controller.heat_loss_coeff * (ambient - temp) + controller.heat_gain_coeff * action
-        )
         previous = action
     return total
 
@@ -332,7 +334,7 @@ def test_sub_bucket_heating_accumulates() -> None:
     _, result = controller.suggest_control(19.0, outdoor, prices, price_baseline_override=1.0)
     assert all(result.sequence)
     assert result.predicted_temperatures[-1] == pytest.approx(19.08)
-    assert result.cost < 4.0
+    assert result.comfort_violation_degree_hours < 4.0
     assert result.cost == pytest.approx(_unrounded_cost(controller, 19.0, outdoor, prices, result.sequence))
 
 
@@ -346,8 +348,13 @@ def test_short_horizon_matches_exhaustive_unrounded_search(loss, gain) -> None:
     outdoor = [-10.0, -9.0, -8.0, -10.0, -11.0, -10.0, -9.0, -10.0]
     prices = [0.5, 0.5, 1.0, 2.0, 2.0, 1.0, 0.5, 0.5]
     _, result = controller.suggest_control(19.807, outdoor, prices, price_baseline_override=1.0)
-    optimal_cost = min(
-        _unrounded_cost(controller, 19.807, outdoor, prices, sequence)
-        for sequence in product((False, True), repeat=8)
-    )
+    def rank(sequence):
+        temp = 19.807
+        violation = 0.0
+        for ambient, action in zip(outdoor, sequence):
+            temp += controller.time_step_hours * (loss * (ambient-temp) + gain * action)
+            violation += max(0, abs(temp-20)-0.05) * controller.time_step_hours
+        return violation, _unrounded_cost(controller, 19.807, outdoor, prices, sequence)
+    optimal_violation, optimal_cost = min(rank(seq) for seq in product((False, True), repeat=8))
+    assert result.comfort_violation_degree_hours == pytest.approx(optimal_violation)
     assert result.cost == pytest.approx(optimal_cost)

@@ -64,7 +64,7 @@ reliable heat signal exists, learning is disabled.
 
 Everyday comfort settings appear first, followed by **Sensors and heat pump**.
 Advanced settings are in collapsed groups at the bottom: control, prices,
-learning, detection, overshoot, initial estimates and diagnostics. Existing
+learning, detection, initial estimates and diagnostics. Existing
 options retain their original storage keys.
 
 ## Configuration options and defaults
@@ -98,8 +98,8 @@ until then, the baseline uses available forecast/new observations. This does not
 reset learned house coefficients.
 
 Further control options:
-- Continuous control enabled (default: true): smooths virtual outdoor temperature using MPC duty ratio.
-- Continuous control window (default: 2 h): duty averaging horizon for the fallback binary planner (1–4 h). The validated response planner chooses duty directly.
+- Continuous control enabled (default: true): plans request strength and actual virtual-temperature commands directly for number outputs at the normal 15-minute interval.
+- Continuous control window (legacy binary modes only, default: 2 h): duty averaging horizon (1–4 h). Hidden when the command-aware planner is selected; learned and unlearned delivery models both choose requests directly.
 - Summer low-price heat window (default: off): optionally schedules one daily
   continuous heat window during low-demand periods when every price sample in
   the window is at or below the configured absolute max price.
@@ -121,14 +121,9 @@ Further control options:
 Virtual outdoor control:
 - Virtual outdoor heat offset (default: 10.0°C): max shift colder when heating and warmer when backing off; start at 6–12°C.
 - Virtual outdoor minimum (default: -15.0°C): never send a lower virtual outdoor temperature unless the actual outdoor temperature is already below this.
-- Overshoot warm bias enabled (default: true): warm bias when predicted above target; also boosts MPC comfort penalty when above target.
-- Overshoot warm bias curve (default: linear): shape of the back-off ramp; options are linear, quadratic, cubic, sqrt.
-- Overshoot warm bias min/max: derived from the heat offset: min = 0, max = virtual_outdoor_heat_offset.
-  - Curve shapes: linear = proportional ramp; quadratic/cubic = gentle early, stronger near full effect; sqrt = stronger early, gentler later.
-- Overshoot warm bias hysteresis enabled (default: true): adds a deadband around the comfort tolerance to prevent on/off chatter.
-- Overshoot warm bias hysteresis (default: 0.2°C): extra margin above/below the tolerance before the bias toggles.
+- Separate overshoot warm-bias controls are retired. Saved values remain compatible, but do not alter the new planner or live output.
 - Virtual outdoor smoothing enabled (default: true): apply EMA smoothing to the output temperature.
-- Virtual outdoor smoothing alpha (default: 0.5): 0–1; lower is smoother/slower, higher is more responsive.
+- Output responsiveness / smoothing alpha (default: 0.5): 0–1 per normal control interval; lower is smoother/slower, higher is more responsive. Existing alpha settings retain their meaning at the normal cadence.
 
 Learning:
 - Learning model (new-install default: adaptive): jointly learns loss, heating gain and background warmth. Existing explicit EKF/RLS selections are retained.
@@ -175,34 +170,58 @@ Price‑first:
 - Comfort tolerance: 1.0–1.5°C
 - Virtual outdoor heat offset: 6–10°C
 
+## Planning comfort, preheating and coasting
+
+The existing target and comfort tolerance define a symmetric planning band:
+`lower = target - tolerance`, `upper = target + tolerance`. For target 20.5 C
+and tolerance 1.2 C, the allowed predicted range is 19.3 to 21.7 C. A larger
+range permits both deeper coasting and more preheating; it does not require
+heating to the upper limit.
+
+MPC first minimizes predicted temperature excursions outside that band, then
+uses **Price vs Comfort** to choose between equally feasible plans. It still
+runs at the existing control cadence. A high price weight favors cheaper heating
+and coasting inside the band; a low weight prefers staying close to target.
+0.5 weights the normalized terms equally, not equal real-world discomfort and
+currency. High prices alone cannot buy a breach when the search finds a plan
+that stays inside the band. This changes the meaning of tolerance from a soft
+penalty deadband to a planning boundary; existing values are not changed.
+
+Normal virtual-temperature control includes the actual output bounds, rounding,
+EMA smoothing and, when validated, the learned delivery delay/residual heating.
+Until learning is ready, the same planner uses an explicitly unlearned immediate
+proportional delivery estimate. This fallback cannot know an old pump's integral;
+its predicted comfort band is not a guarantee of actual room temperature.
+
+Backoff and preheating are outcomes of the same optimization. There is no extra
+warm-bias rule or request hold/ramp rewriting the command-aware planner's first
+action. A small command-change cost discourages needless reversals, and elapsed-
+time output smoothing remains. Legacy nonstandard binary modes retain their
+request limiter. Independent summer heating remains an explicit override.
+
+The diagnostic fields `planning_model` (`learned`, `fallback`, or `binary`),
+`planned_comfort_status`, `planned_comfort_violation_degree_hours`, and
+`comfort_lower_bound` / `comfort_upper_bound` expose the result. A
+`predicted_breach` means the selected plan crosses a boundary, including passive
+warming above it or insufficient predicted capacity. The bounded search does
+not prove global physical infeasibility; it reports a forecast, not a guarantee.
+
+See [the design and behavioral test contracts](docs/comfort_planning.md).
+
 ## Virtual outdoor temperature
-The integration computes a "virtual outdoor" temperature and applies it to the
-controlled entity. The mapping is:
-- If heating is requested: `virtual = outdoor - virtual_heat_offset`.
-- If idle: `virtual = outdoor + warm_bias`, where warm_bias depends on price and
-  (optionally) indoor overshoot. Warm bias is capped by `virtual_heat_offset`.
-- A hard cap of 25C prevents pushing the pump into summer/no-heat mode.
-If **Virtual outdoor minimum** is configured, the controller will not send a
-virtual outdoor temperature below that minimum unless the actual outdoor
-temperature is already lower.
-When **continuous control** is enabled, the controller smooths the virtual
-outdoor temperature based on the planned duty ratio over a short window. A
-ratio of 0 maps to `outdoor + virtual_heat_offset`, while 1 maps to
-`outdoor - virtual_heat_offset`. Price/overshoot warm-bias is only applied at
-pure idle (`duty_ratio == 0`), not during active preheating/heating duty.
-When overshoot warm bias is enabled, the MPC comfort penalty becomes asymmetric:
-above-target errors are penalized more strongly once indoor temperature exceeds
-the comfort tolerance. The warm-bias back-off ramps from a minimum of `0` to a
-maximum of `virtual_outdoor_heat_offset`,
-using the selected curve (linear/quadratic/cubic/sqrt). Below-target penalties
-are unchanged.
-This acts as a back-off when indoor temperature is above target by pushing the
-virtual outdoor higher so the pump is less likely to heat.
-When overshoot hysteresis is enabled, the back-off only activates once the
-indoor temperature exceeds `comfort_tolerance + hysteresis`, and it stays active
-until the temperature drops below `comfort_tolerance - hysteresis`.
-When virtual outdoor smoothing is enabled, the output is EMA-smoothed between
-control runs; use a lower alpha for smoother, slower changes.
+
+For request strength `u` from 0 to 1, the mapping is
+`virtual = outdoor + offset * (1 - 2*u)`: zero requests maximum warm backoff,
+one requests maximum heating, and 0.5 is neutral. The virtual-temperature
+minimum, 25 C maximum, and controlled entity bounds/rounding still apply.
+The planner sends its exact first predicted command. It learns from measured
+heating, never assuming that requested idle instantly stops the compressor.
+
+Smoothing uses elapsed time:
+`effective_alpha = 1 - (1 - alpha) ** (elapsed / control_interval)`.
+Extra sensor updates do not accelerate smoothing. Alpha 1 disables output
+smoothing; the enable switch is retained for existing configurations. No new
+user settings are introduced, and Price vs Comfort remains available.
 
 ### Summer low-price heat window
 The optional summer heat window is intended for periods where normal space
@@ -292,9 +311,17 @@ discard the associated observation history.
 
 A separate model learns request strength, idle heating, delay (0–120 minutes)
 and response smoothing from complete 15-minute averages of the actual controlled
-number state and measured heating. It requires at least 28 continuous usable
-hours with heating, coasting and varying requests; it fits at most hourly on up
-to 72 hours of history.
+number state and the debounced measured heating detector. Unlike house learning,
+it does not require indoor temperature or apply the extra supply-temperature
+learning margins. This preserves measured start/stop transitions during short
+heating cycles and prevents sunshine at the indoor sensor from interrupting pump
+learning. Missing pump, outdoor or request observations still fail coverage
+checks; gaps are never filled with invented heating.
+
+Initial fitting requires at least 28 hours of retained observations, with enough
+continuous stretches, heating, coasting and varying requests. It fits at most
+hourly on up to 288 quarter-hour observations; gaps split those observations
+into separate stretches.
 
 The same learner also tests a small outdoor-temperature correction, without an
 additional configuration setting. Its target heating fraction is
@@ -318,17 +345,32 @@ still uses the actual forecast temperature.
 
 Saved pump observations now include their interval-average outdoor temperature.
 Older observations are retained for the simpler fit with outdoor marked unknown;
-they are not assigned invented temperatures. Fresh validation is still required
-after a restart. The decision sensor's `pump_response` attributes expose
+they are not assigned invented temperatures. Restarts retain observations and
+fitted coefficients. Gaps split the evidence into separate stretches: fitting,
+lag selection and validation never bridge unknown time. A new completed interval
+triggers revalidation against the retained evidence. MPC additionally waits for
+fresh measured heating and request history covering the learned delay (at least
+15 minutes, up to two hours); restarting does not require rebuilding the entire
+28-hour training history. Recent operating state and partial intervals are not
+restored as if the pump had been observed while Home Assistant was offline. The decision sensor's `pump_response` attributes expose
 `outdoor_active`, `outdoor_reason`, `outdoor_gain_per_10c`, `outdoor_range_c` and
 both candidate validation errors. `outdoor_active` means the learner accepted
 the correction; `pump_response_planning_active` separately indicates whether
 the latest MPC plan actually used response learning.
 
-Delay is selected on training observations. The following four hours must show
+Delay is selected on training observations. The following 16 observations must show
 at least 10% lower heating prediction error than both direct-request and
-constant-duty baselines. Restarts, gaps and failed validation suspend readiness.
-The binary planner remains the fallback. When using the adaptive house model,
+constant-duty baselines. When the baseline error is below 0.02 heating fraction,
+the period cannot validate a new response. An already validated response is
+retained unchanged if its error on those observations is also at most 0.02. When heating resumes, the saved response can remain usable if it beats the same recent-validation baselines by at least 10%, even before the training window has enough heating to fit a replacement. Contradictory observations revoke that trust.
+This allows long coasting periods without discarding a useful delay model.
+Incompatible observations suspend that trust. The validation marker is saved
+with the coefficients; restarts still require fresh measured state, and older
+snapshots without the marker must pass normal validation first.
+
+Restarts and gaps suspend live state until enough fresh evidence is available.
+The command-aware planner uses the immediate proportional fallback when response
+planning is unavailable. When using the adaptive house model,
 its heating gain must also be identifiable before response planning activates.
 
 When eligible, MPC chooses 0/25/50/75/100% requested duty and simulates delayed
@@ -417,6 +459,15 @@ This means learning, price baselines, performance scores, and the selected daily
 summer heat window survive restarts.
 
 ## Sensors and diagnostics
+The existing **Sensor inputs** persistent notification warns when indoor,
+outdoor or heating-detection supply temperature has not reported for more than
+24 hours. It uses Home Assistant's `last_reported` timestamp (falling back to
+`last_updated` on older versions), so repeated reports of an unchanged temperature
+remain fresh. Missing or unavailable inputs are also reported; issues must persist
+for five minutes, after a two-minute startup grace, before a notification appears.
+The warning clears when valid reports resume. This notification threshold does
+not change the separate, configurable UFH pump safety freshness limit.
+
 Key diagnostic sensors:
 - Heat Pump Pilot Decision: last MPC action plus forecast/plan details, including:
   `overshoot_warm_bias_enabled`, `overshoot_warm_bias_curve`,

@@ -199,13 +199,16 @@ def test_response_does_not_identify_gain_from_no_heating_or_no_request_variation
         assert model.reason == reason
 
 
-def test_pump_gap_resets_history():
+def test_pump_gap_preserves_history_but_requires_fresh_state():
     model = PumpResponseModel()
     for sample in pump_samples():
         model.add_interval(sample)
+    previous = list(model.history)
     model.add_interval(interval(200, heat=0, request=0, hours=0.25))
-    assert not model.ready
-    assert len(model.history) == 1
+    assert model.history[:-1] == previous
+    assert model.fresh_samples == 1
+    if model.parameters.delay_steps > 1:
+        assert model.initial_state(model.history[-1][0]) is None
 
 
 def test_virtual_request_uses_actual_value_and_settings_are_independent():

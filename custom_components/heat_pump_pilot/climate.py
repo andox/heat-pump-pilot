@@ -138,6 +138,7 @@ from .config_helpers import HVAC_MODE_OFF, normalize_hvac_mode
 from .control_adapter import ControlAdapter
 from .control_request_utils import (
     EffectiveHeatRequest,
+    elapsed_smoothing_alpha,
     classify_effective_heat_request,
     resolve_effective_heat_request,
     summarize_heating_detection_gap,
@@ -178,11 +179,10 @@ from .summer_heat_window import (
     find_summer_heat_window_from_timed_values,
 )
 from .learning_manager import LearningManager
-from .pump_response import virtual_request
+from .pump_response import ResponseParameters, virtual_request
 from .response_optimizer import VirtualActuator, replay as replay_response
 from .virtual_outdoor_utils import (
     compute_duty_ratio,
-    compute_overshoot_warm_bias,
     compute_planned_virtual_outdoor_temperatures,
     compute_virtual_outdoor_from_mpc_step,
 
@@ -313,15 +313,13 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._last_raw_requested_duty_ratio: float = 0.0
         self._last_effective_requested_duty_ratio: float | None = None
         self._last_effective_heat_request_state: str = "idle"
-        self._effective_request_same_ratio_runs = 0
+        self._effective_request_last_increase = None
         self._last_anti_chatter_limited = False
         self._last_anti_chatter_reason: str | None = None
         self._last_raw_mpc_sequence_head: list[bool] = []
         self._last_virtual_outdoor_shift: float | None = None
         self._last_virtual_outdoor_raw: float | None = None
         self._last_virtual_outdoor: float | None = None
-        self._last_overshoot_bias_delta: float | None = None
-        self._overshoot_warm_bias_active: bool | None = None
         self._price_history: list[float] = []
         self._price_observations = PriceObservations()
         self._last_price_bucket_start = None
@@ -403,9 +401,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._heating_detection_enabled = bool(settings.heating_detection_enabled)
         self._heating_supply_temp_hysteresis = float(settings.heating_supply_temp_hysteresis)
         self._heating_supply_temp_debounce_seconds = float(settings.heating_supply_temp_debounce_seconds)
-        self._overshoot_warm_bias_enabled = bool(settings.overshoot_warm_bias_enabled)
+        # Retired runtime rules: retain option parsing for saved-config compatibility.
+        self._overshoot_warm_bias_enabled = False
         self._overshoot_warm_bias_curve = str(settings.overshoot_warm_bias_curve)
-        self._overshoot_warm_bias_hysteresis_enabled = bool(settings.overshoot_warm_bias_hysteresis_enabled)
+        self._overshoot_warm_bias_hysteresis_enabled = False
         self._overshoot_warm_bias_hysteresis = float(settings.overshoot_warm_bias_hysteresis)
         self._virtual_outdoor_smoothing_enabled = bool(settings.virtual_outdoor_smoothing_enabled)
         self._virtual_outdoor_smoothing_alpha = float(settings.virtual_outdoor_smoothing_alpha)
@@ -874,7 +873,12 @@ class MpcHeatPumpClimate(ClimateEntity):
             "estimated_background_gain": getattr(self._thermal_model, "background_gain", 0.0),
             "learning_details": self._learning.diagnostics(),
             "pump_response": self._learning.pump.diagnostics(),
-            "pump_response_planning_active": bool(self._last_result and self._last_result.predicted_heating is not None),
+            "pump_response_planning_active": bool(self._last_result and getattr(self._last_result, "response_model_source", None) == "learned"),
+            "planning_model": getattr(self._last_result, "response_model_source", None) or "binary",
+            "planned_comfort_status": getattr(self._last_result, "comfort_status", None),
+            "planned_comfort_violation_degree_hours": getattr(self._last_result, "comfort_violation_degree_hours", None),
+            "comfort_lower_bound": self._target_temperature - self._comfort_tolerance,
+            "comfort_upper_bound": self._target_temperature + self._comfort_tolerance,
             "estimated_indoor_temperature": self._thermal_model.indoor_temp,
             "nominal_heat_power_kw": nominal_heat_power_kw,
             "estimated_thermal_capacitance_kwh_per_c": cap_kwh_per_c,
@@ -940,7 +944,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._last_raw_requested_duty_ratio = 0.0
             self._last_effective_requested_duty_ratio = 0.0
             self._last_effective_heat_request_state = classify_effective_heat_request(0.0)
-            self._effective_request_same_ratio_runs = 0
+            self._effective_request_last_increase = None
             self._last_anti_chatter_limited = False
             self._last_anti_chatter_reason = None
             self._last_raw_mpc_sequence_head = []
@@ -963,15 +967,13 @@ class MpcHeatPumpClimate(ClimateEntity):
             self._last_raw_requested_duty_ratio = 0.0
             self._last_effective_requested_duty_ratio = 0.0
             self._last_effective_heat_request_state = classify_effective_heat_request(0.0)
-            self._effective_request_same_ratio_runs = 0
+            self._effective_request_last_increase = None
             self._last_anti_chatter_limited = False
             self._last_anti_chatter_reason = None
             self._last_raw_mpc_sequence_head = []
             self._last_virtual_outdoor = self._compute_off_virtual_outdoor()
             self._last_virtual_outdoor_raw = self._last_virtual_outdoor
             self._last_virtual_outdoor_shift = 0.0
-            self._last_overshoot_bias_delta = None
-            self._overshoot_warm_bias_active = None
             await self._apply_control(False)
             self._publish_decision()
             await self._async_update_notifications(now)
@@ -982,7 +984,10 @@ class MpcHeatPumpClimate(ClimateEntity):
             now = dt_util.utcnow()
             indoor_temp = self._get_state_as_float(self._indoor_temp_entity)
             if indoor_temp is None:
-                _LOGGER.warning("Indoor temperature unavailable: %s", self._indoor_temp_entity)
+                # Zigbee and other integrations may populate entities after Pilot starts.
+                # Keep runtime failures visible without warning on expected startup gaps.
+                log = _LOGGER.debug if now - self._startup_time < STARTUP_SENSOR_GRACE else _LOGGER.warning
+                log("Indoor temperature unavailable: %s", self._indoor_temp_entity)
                 self._publish_decision()
                 await self._async_update_notifications(now)
                 self.async_write_ha_state()
@@ -1061,25 +1066,24 @@ class MpcHeatPumpClimate(ClimateEntity):
                 if summer_override:
                     duty_ratio = 1.0
             self._last_duty_ratio = duty_ratio
-            predicted_control_temp = None
-            if result and len(result.predicted_temperatures) > 1:
-                predicted_control_temp = result.predicted_temperatures[1]
-            elif result and result.predicted_temperatures:
-                predicted_control_temp = result.predicted_temperatures[0]
+            # Use the same current temperature as the response planner's first
+            # node for comfort exceptions, rather than a candidate's prediction.
+            predicted_control_temp = indoor_temp
             effective_request = self._build_effective_heat_request(
                 raw_heat_on=control_decision,
                 raw_duty_ratio=duty_ratio,
                 predicted_temp=predicted_control_temp,
+                now=now,
             )
             if summer_override:
                 effective_request = resolve_effective_heat_request(
                     raw_requested_duty_ratio=1.0, previous_effective_duty_ratio=None,
-                    previous_same_ratio_runs=0, predicted_temp=predicted_control_temp,
+                    elapsed_seconds=0, seconds_since_increase=0, predicted_temp=predicted_control_temp,
                     target_temperature=self._target_temperature, comfort_tolerance=self._comfort_tolerance,
                     anti_chatter_enabled=False,
                 )
             self._last_raw_requested_duty_ratio = effective_request.raw_requested_duty_ratio
-            self._commit_effective_heat_request(effective_request)
+            self._commit_effective_heat_request(effective_request, now=now)
             self._last_virtual_outdoor = self._compute_virtual_outdoor(
                 control_decision,
                 outdoor_for_mpc,
@@ -1087,6 +1091,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                 if self._continuous_control_enabled
                 else duty_ratio,
                 heat_offset=self._summer_heat_window_virtual_heat_offset if summer_override else None,
+                now=now,
             )
             if response_context is not None and result and result.duty_sequence:
                 duties = list(result.duty_sequence)
@@ -1100,6 +1105,7 @@ class MpcHeatPumpClimate(ClimateEntity):
                 result.predicted_heating, result.planned_virtual_outdoor = heating, virtuals
                 result.cost = cost
                 result.sequence = [d > 0 for d in duties]
+                planning_controller.update_comfort_diagnostics(result)
             await self._apply_control(control_decision)
             self._last_control_on = control_decision
             self._last_control_time = now
@@ -1162,7 +1168,10 @@ class MpcHeatPumpClimate(ClimateEntity):
         if (self._settings.pump_response_enabled and not self._monitor_only
                 and self._controlled_entity and self._controlled_entity.startswith("number.")):
             request = virtual_request(outdoor, self._get_state_as_float(self._controlled_entity), self._virtual_heat_offset)
-        updated = self._learning.observe(now.timestamp(), indoor, outdoor, heat, request)
+        updated = self._learning.observe(
+            now.timestamp(), indoor, outdoor, heat, request,
+            pump_heat=self._get_heating_detected(now),
+        )
         if updated:
             self._heat_loss_coeff = self._thermal_model.heat_loss_coeff
             self._record_model_history(now)
@@ -1179,17 +1188,25 @@ class MpcHeatPumpClimate(ClimateEntity):
         self._collect_learning(now)
 
     def _response_context(self, now):
-        if (not self._settings.pump_response_enabled or self._monitor_only
-                or not self._continuous_control_enabled
+        """One command-aware planner, using learned delivery when trustworthy."""
+        if (self._monitor_only or not self._continuous_control_enabled
                 or not self._controlled_entity or not self._controlled_entity.startswith("number.")
-                or self._control_interval != 15 or self._virtual_heat_offset <= 0
-                or getattr(self._thermal_model, "gain_identified", True) is False):
+                or self._control_interval != 15 or self._virtual_heat_offset <= 0):
             return None
-        initial = self._learning.response_state(now.timestamp())
         value = self._get_state_as_float(self._controlled_entity)
-        if (initial is None or value is None or self._get_heat_on_for_model(now) is None
-                or self._get_state_as_float(self._outdoor_temp_entity) is None):
+        if value is None or self._get_state_as_float(self._outdoor_temp_entity) is None:
             return None
+        initial = None
+        if (self._settings.pump_response_enabled
+                and getattr(self._thermal_model, "gain_identified", True)
+                and self._get_heating_detected(now) is not None):
+            initial = self._learning.response_state(now.timestamp())
+        learned = initial is not None
+        # Unlearned fallback is explicitly an immediate proportional estimate;
+        # it does not pretend to know the pump's integral or learned delay.
+        parameters = self._learning.pump.parameters if learned else ResponseParameters()
+        if initial is None:
+            initial = (0.0, ())
         state = self.hass.states.get(self._controlled_entity)
         attrs = state.attributes if state else {}
         def number(key, default):
@@ -1198,8 +1215,14 @@ class MpcHeatPumpClimate(ClimateEntity):
         actuator = VirtualActuator(
             self._virtual_heat_offset, self._virtual_outdoor_min_temp,
             self._virtual_outdoor_smoothing_alpha if self._virtual_outdoor_smoothing_enabled else 1.0,
-            value, number("min", -100.0), number("max", 100.0), number("step", 0.0))
-        return self._learning.pump.parameters, initial, actuator
+            value, number("min", -100.0), number("max", 100.0), number("step", 0.0),
+            initial_duty=self._last_effective_requested_duty_ratio,
+            first_elapsed_seconds=self._request_elapsed_seconds(now),
+            initial_increase_age=self._request_increase_age(now),
+            anti_chatter=False,
+            reference_seconds=self._control_interval * 60.0,
+            learned_response=learned)
+        return parameters, initial, actuator
 
     def _record_model_history(self, now) -> None:
         """Record learned coefficients for learning/health status."""
@@ -1395,28 +1418,44 @@ class MpcHeatPumpClimate(ClimateEntity):
         raw_heat_on: bool,
         raw_duty_ratio: float | None,
         predicted_temp: float | None,
+        now=None,
     ) -> EffectiveHeatRequest:
         """Resolve the effective request after internal anti-chatter limiting."""
         raw_requested_duty_ratio = raw_duty_ratio if raw_duty_ratio is not None else (1.0 if raw_heat_on else 0.0)
-        anti_chatter_enabled = self._continuous_control_enabled and self._uses_virtual_outdoor_control()
+        # The command-aware planner already prices command changes and models
+        # smoothing. Do not rewrite its deliberate preheat/coast decisions.
+        planned_request = bool(getattr(getattr(self, "_last_result", None), "duty_sequence", None))
+        anti_chatter_enabled = (
+            self._continuous_control_enabled and self._uses_virtual_outdoor_control()
+            and not planned_request
+        )
         return resolve_effective_heat_request(
             raw_requested_duty_ratio=raw_requested_duty_ratio,
             previous_effective_duty_ratio=self._last_effective_requested_duty_ratio,
-            previous_same_ratio_runs=self._effective_request_same_ratio_runs,
+            elapsed_seconds=self._request_elapsed_seconds(now),
+            seconds_since_increase=self._request_increase_age(now),
             predicted_temp=predicted_temp,
             target_temperature=self._target_temperature,
             comfort_tolerance=self._comfort_tolerance,
             anti_chatter_enabled=anti_chatter_enabled,
         )
 
-    def _commit_effective_heat_request(self, request: EffectiveHeatRequest) -> None:
+    def _request_elapsed_seconds(self, now=None) -> float:
+        now = now or dt_util.utcnow()
+        last = self._last_control_time
+        return max(0.0, (now - last).total_seconds()) if last else self._control_interval * 60.0
+
+    def _request_increase_age(self, now=None) -> float:
+        now = now or dt_util.utcnow()
+        last = self._effective_request_last_increase
+        return max(0.0, (now - last).total_seconds()) if last else float("inf")
+
+    def _commit_effective_heat_request(self, request: EffectiveHeatRequest, *, now=None) -> None:
         """Persist the latest effective request for future anti-chatter decisions."""
         previous = self._last_effective_requested_duty_ratio
         current = request.effective_requested_duty_ratio
-        if previous is not None and abs(previous - current) < 1e-6:
-            self._effective_request_same_ratio_runs += 1
-        else:
-            self._effective_request_same_ratio_runs = 1
+        if previous is None or current > previous + 1e-9:
+            self._effective_request_last_increase = now or dt_util.utcnow()
         self._last_effective_requested_duty_ratio = current
         self._last_effective_heat_request_state = request.effective_heat_request_state
         self._last_anti_chatter_limited = request.anti_chatter_limited
@@ -1794,63 +1833,17 @@ class MpcHeatPumpClimate(ClimateEntity):
             virtual_outdoor=self._last_virtual_outdoor,
         )
 
-    def _adjust_predicted_temp_for_overshoot_bias(self, predicted_temp: float | None) -> float | None:
-        """Apply overshoot hysteresis and return a temperature for bias calculations."""
-        if predicted_temp is None:
-            self._last_overshoot_bias_delta = None
-            return None
-        if not self._overshoot_warm_bias_enabled:
-            try:
-                self._last_overshoot_bias_delta = float(predicted_temp) - float(self._target_temperature)
-            except (TypeError, ValueError):
-                self._last_overshoot_bias_delta = None
-            self._overshoot_warm_bias_active = False
-            return predicted_temp
-        try:
-            target = float(self._target_temperature)
-            overshoot = float(predicted_temp) - target
-            tolerance = max(0.0, float(self._comfort_tolerance))
-        except (TypeError, ValueError):
-            self._last_overshoot_bias_delta = None
-            return predicted_temp
-
-        hysteresis_enabled = bool(self._overshoot_warm_bias_hysteresis_enabled)
-        try:
-            hysteresis = max(0.0, float(self._overshoot_warm_bias_hysteresis))
-        except (TypeError, ValueError):
-            hysteresis = 0.0
-        if not hysteresis_enabled or hysteresis <= 0.0:
-            self._overshoot_warm_bias_active = overshoot > tolerance
-            self._last_overshoot_bias_delta = overshoot
-            return predicted_temp
-
-        upper = tolerance + hysteresis
-        lower = max(0.0, tolerance - hysteresis)
-        active = self._overshoot_warm_bias_active
-        if active is None:
-            active = overshoot > tolerance
-        if active:
-            if overshoot <= lower:
-                active = False
-        else:
-            if overshoot >= upper:
-                active = True
-        self._overshoot_warm_bias_active = active
-        if active:
-            overshoot = max(0.0, overshoot - hysteresis)
-        else:
-            overshoot = min(overshoot, tolerance)
-        self._last_overshoot_bias_delta = overshoot
-        return target + overshoot
-
-    def _apply_virtual_outdoor_smoothing(self, value: float, *, base: float, offset: float) -> float:
+    def _apply_virtual_outdoor_smoothing(self, value: float, *, base: float, offset: float, now=None) -> float:
         """Apply EMA smoothing to the virtual outdoor temperature."""
         if not self._virtual_outdoor_smoothing_enabled:
             return value
         last_value = self._last_virtual_outdoor
         if last_value is None:
             return value
-        alpha = self._virtual_outdoor_smoothing_alpha
+        alpha = elapsed_smoothing_alpha(
+            self._virtual_outdoor_smoothing_alpha, self._request_elapsed_seconds(now),
+            self._control_interval * 60.0,
+        )
         smoothed = last_value + alpha * (value - last_value)
         min_value = base - offset
         max_value = min(base + offset, MAX_VIRTUAL_OUTDOOR)
@@ -1875,6 +1868,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         *,
         duty_ratio: float | None = None,
         heat_offset: float | None = None,
+        now=None,
     ) -> float | None:
         """Compute the virtual outdoor temperature to send to the pump interface."""
         base = None
@@ -1893,7 +1887,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         predicted_temp = self._indoor_temp
         if self._last_result and self._last_result.predicted_temperatures:
             predicted_temp = self._last_result.predicted_temperatures[0]
-        adjusted_predicted = self._adjust_predicted_temp_for_overshoot_bias(predicted_temp)
+        adjusted_predicted = predicted_temp
         raw_value = compute_virtual_outdoor_from_mpc_step(
             base_outdoor=base,
             heat_on=heat_on,
@@ -1908,12 +1902,18 @@ class MpcHeatPumpClimate(ClimateEntity):
             comfort_temperature_tolerance=self._comfort_tolerance,
             overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
             overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
-            duty_ratio=duty_ratio if self._continuous_control_enabled else None,
+            duty_ratio=duty_ratio if self._continuous_control_enabled and duty_ratio is not None else float(heat_on),
             max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
         )
         raw_value = self._apply_virtual_outdoor_min_temp(raw_value, base=base)
-        value = self._apply_virtual_outdoor_smoothing(raw_value, base=base, offset=offset)
-        value = self._apply_virtual_outdoor_min_temp(value, base=base)
+        planned = getattr(self._last_result, "planned_virtual_outdoor", None)
+        if heat_offset is None and planned:
+            # The planner already applied smoothing, hardware limits and rounding.
+            # Send that exact first command; do not run a second backoff rule.
+            value = planned[0]
+        else:
+            value = self._apply_virtual_outdoor_smoothing(raw_value, base=base, offset=offset, now=now)
+            value = self._apply_virtual_outdoor_min_temp(value, base=base)
         self._last_virtual_outdoor_raw = raw_value
         self._last_virtual_outdoor_shift = value - base
         # Never send a virtual outdoor warmer than 25C (summer/no heat).
@@ -2081,17 +2081,22 @@ class MpcHeatPumpClimate(ClimateEntity):
             overshoot_warm_bias_enabled=self._overshoot_warm_bias_enabled,
             comfort_temperature_tolerance=self._comfort_tolerance,
             overshoot_warm_bias_curve=self._overshoot_warm_bias_curve,
-            continuous_control_enabled=self._continuous_control_enabled,
+            continuous_control_enabled=True,
             continuous_control_window_steps=self._continuous_control_window_steps()
             if self._continuous_control_enabled
-            else None,
+            else 1,
             max_virtual_outdoor=MAX_VIRTUAL_OUTDOOR,
         )
         if self._last_result and self._last_result.planned_virtual_outdoor is not None:
             planned_virtual_outdoor = self._last_result.planned_virtual_outdoor
         payload = {
             "pump_response": self._learning.pump.diagnostics(),
-            "pump_response_planning_active": bool(self._last_result and self._last_result.predicted_heating is not None),
+            "pump_response_planning_active": bool(self._last_result and getattr(self._last_result, "response_model_source", None) == "learned"),
+            "planning_model": getattr(self._last_result, "response_model_source", None) or "binary",
+            "planned_comfort_status": getattr(self._last_result, "comfort_status", None),
+            "planned_comfort_violation_degree_hours": getattr(self._last_result, "comfort_violation_degree_hours", None),
+            "comfort_lower_bound": self._target_temperature - self._comfort_tolerance,
+            "comfort_upper_bound": self._target_temperature + self._comfort_tolerance,
             "planned_requested_duty": self._last_result.duty_sequence if self._last_result else None,
             "predicted_heating": self._last_result.predicted_heating if self._last_result else None,
             "suggested_heat_on": self._last_control_on,
@@ -2239,20 +2244,8 @@ class MpcHeatPumpClimate(ClimateEntity):
         )
 
     def _comfort_overshoot_multiplier(self) -> tuple[float, float, float, float]:
-        """Return (bias, multiplier, min_bias, max_bias) for above-target comfort penalty."""
-        if self._indoor_temp is None:
-            return 0.0, 1.0, 0.0, 0.0
-        if not self._overshoot_warm_bias_enabled:
-            return 0.0, 1.0, 0.0, 0.0
-        delta = self._last_overshoot_bias_delta
-        if delta is None:
-            delta = float(self._indoor_temp) - float(self._target_temperature)
-        return compute_overshoot_warm_bias(
-            delta,
-            self._comfort_tolerance,
-            self._virtual_heat_offset,
-            self._overshoot_warm_bias_curve,
-        )
+        """Legacy diagnostic fields: backoff is now chosen by the planner."""
+        return 0.0, 1.0, 0.0, 0.0
 
     def _notification_id(self, event_id: str) -> str:
         return f"{DOMAIN}_{self.config_entry.entry_id}_{event_id}"
@@ -2300,8 +2293,7 @@ class MpcHeatPumpClimate(ClimateEntity):
         issues: list[tuple[str, str, float | None]] = []
         # Prefer report timestamps so unchanged readings remain fresh. Some
         # devices only transmit changes, so allow quiet periods before warning.
-        stale_required_temperature = timedelta(hours=6)
-        stale_required_supply = stale_required_temperature
+        stale_required_temperature = timedelta(hours=24)
 
         problem, age = self._entity_problem(self._indoor_temp_entity, now, stale_after=stale_required_temperature)
         if problem:
@@ -2312,7 +2304,7 @@ class MpcHeatPumpClimate(ClimateEntity):
             issues.append((self._outdoor_temp_entity, problem, age))
 
         if self._heating_detection_active() and self._heating_supply_temp_entity:
-            problem, age = self._entity_problem(self._heating_supply_temp_entity, now, stale_after=stale_required_supply)
+            problem, age = self._entity_problem(self._heating_supply_temp_entity, now, stale_after=stale_required_temperature)
             if problem:
                 issues.append((self._heating_supply_temp_entity, problem, age))
 
