@@ -1,0 +1,516 @@
+# Manual dashboard card. Requires ApexCharts Card 2.2+.
+# Replace non-Pilot entity IDs and the price unit with your own.
+# Future published prices require Nordpool raw_today/raw_tomorrow attributes.
+# Remove optional UFH pump/supply-temperature series if not configured.
+type: "custom:apexcharts-card"
+cache: true
+header:
+  show: true
+  title: "Heat Pump Pilot - Overview"
+  show_states: true
+  colorize_states: true
+graph_span: "48h"
+span:
+  start: "hour"
+  offset: "-24h"
+now:
+  show: true
+  label: ""
+  color: "#F87171"
+all_series_config:
+  extend_to: "now"
+  float_precision: 1
+  fill_raw: "null"
+apex_config:
+  chart:
+    height: 460
+    animations:
+      enabled: false
+    toolbar:
+      show: true
+      tools:
+        download: false
+        selection: false
+        zoom: true
+        zoomin: true
+        zoomout: true
+        pan: true
+        reset: true
+    zoom:
+      enabled: true
+    events:
+      mounted: |-
+        EVAL:function(chart) {
+          const series = chart.w.config.series;
+          chart.el.querySelectorAll('.apexcharts-legend-series').forEach(function(el) {
+            const i = Number(el.getAttribute('rel')) - 1;
+            if (series[i] && series[i].name === 'Outdoor forecast') el.style.display = 'none';
+          });
+        }
+      updated: |-
+        EVAL:function(chart) {
+          const series = chart.w.config.series;
+          chart.el.querySelectorAll('.apexcharts-legend-series').forEach(function(el) {
+            const i = Number(el.getAttribute('rel')) - 1;
+            if (series[i] && series[i].name === 'Outdoor forecast') el.style.display = 'none';
+          });
+        }
+      legendClick: |-
+        EVAL:function(chart, index) {
+          if (chart.w.config.series[index]?.name === 'Outdoor') chart.toggleSeries('Outdoor forecast');
+        }
+  markers:
+    size: 0
+    hover:
+      size: 5
+  dataLabels:
+    enabled: false
+  tooltip:
+    shared: true
+    intersect: false
+    x:
+      show: true
+      format: "ddd dd MMM HH:mm"
+    enabled: true
+    followCursor: false
+    y:
+      formatter: |-
+        EVAL:function(value, opts) {
+          if (value === null || value === undefined || !Number.isFinite(Number(value))) return "Unavailable";
+          const name = opts.w.config.series[opts.seriesIndex].name;
+          if (name.startsWith("UFH pump ")) return Number(value) === 1 ? "On" : "Off";
+          const activity = ["Heating detected (on/off)", "Requested heating", "Planned heating request", "Summer override active", "Summer window start", "Summer window end"].includes(name);
+          const price = ["Electricity price", "Published upcoming prices", "Price baseline", "Price absolute low"].includes(name);
+          return Number(value).toFixed(activity ? 0 : price ? 3 : 1) + (activity ? " %" : price ? " SEK/kWh" : " °C");
+        }
+  legend:
+    show: true
+    position: "bottom"
+    fontSize: "11px"
+    itemMargin:
+      horizontal: 10
+      vertical: 2
+    onItemClick:
+      toggleDataSeries: true
+  grid:
+    strokeDashArray: 3
+yaxis:
+  -
+    id: "temp"
+    decimals: 1
+    apex_config:
+      title:
+        text: "Temp (°C)"
+  -
+    id: "price"
+    opposite: true
+    decimals: 2
+    apex_config:
+      title:
+        text: "Price (SEK/kWh)"
+  -
+    id: "binary"
+    opposite: true
+    show: false
+    min: 0
+    max: 100
+    decimals: 0
+  -
+    id: "ufh_activity_0"
+    show: false
+    opposite: true
+    min: -0.4
+    max: 39.6
+    decimals: 0
+  -
+    id: "ufh_activity_1"
+    show: false
+    opposite: true
+    min: -2
+    max: 38
+    decimals: 0
+  -
+    id: "heating_activity"
+    show: false
+    opposite: true
+    min: -360
+    max: 3640
+    decimals: 0
+  -
+    id: "request_activity"
+    show: false
+    opposite: true
+    min: -520
+    max: 3480
+    decimals: 0
+series:
+  -
+    name: "Heating detected (on/off)"
+    entity: "binary_sensor.heat_pump_pilot_heating_detected"
+    type: "line"
+    yaxis_id: "heating_activity"
+    color: "#38BDF8"
+    stroke_width: 1
+    curve: "stepline"
+    opacity: 1
+    transform: "return (x === 'on' || x === true) ? 100 : (x === 'off' || x === false) ? 0 : null;"
+    show:
+      legend_value: false
+      in_header: false
+      hidden_by_default: true
+    unit: "%"
+    float_precision: 0
+  -
+    name: "Requested heating"
+    entity: "sensor.heat_pump_pilot_decision"
+    attribute: "effective_requested_duty_ratio"
+    type: "line"
+    yaxis_id: "request_activity"
+    color: "#EF4444"
+    stroke_width: 1
+    curve: "stepline"
+    opacity: 1
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n * 100 : null;"
+    show:
+      legend_value: false
+      in_header: false
+      hidden_by_default: true
+    unit: "%"
+    float_precision: 0
+  -
+    name: "Indoor (sensor)"
+    entity: "sensor.indoor_temperature"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#22C55E"
+    show:
+      in_header: "raw"
+      legend_value: false
+    unit: "°C"
+    curve: "stepline"
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n : null;"
+    stroke_width: 1
+    fill_raw: "null"
+    extend_to: "now"
+  -
+    name: "Indoor predicted"
+    entity: "sensor.heat_pump_pilot_decision"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#86EFAC"
+    stroke_dash: 5
+    stroke_width: 1
+    extend_to: false
+    show:
+      legend_value: false
+      in_header: false
+    data_generator: |-
+      const d = entity?.attributes || {}; const arr = d.predicted_temperatures || []; const t0 = Date.parse(d.last_control_time || ""); const dt = 15 * 60 * 1000; if (!Number.isFinite(t0) || !Array.isArray(arr) || !arr.length) return []; const cutoff = Date.now() - dt; return arr
+        .map((v, i) => [t0 + i * dt, (v === null || v === undefined || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null))])
+        .filter(p => p[0] >= cutoff);
+    unit: "°C"
+    curve: "straight"
+  -
+    name: "Target (setpoint)"
+    entity: "climate.heat_pump_pilot"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#9CA3AF"
+    stroke_width: 1
+    stroke_dash: 4
+    extend_to: "now"
+    show:
+      legend_value: false
+      in_header: false
+    unit: "°C"
+    curve: "stepline"
+    attribute: "temperature"
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n : null;"
+  -
+    name: "Outdoor"
+    entity: "sensor.outdoor_temperature"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#38BDF8"
+    stroke_width: 1
+    show:
+      in_header: "raw"
+      legend_value: false
+    unit: "°C"
+    curve: "stepline"
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n : null;"
+    fill_raw: "null"
+    extend_to: "now"
+  -
+    name: "Outdoor forecast"
+    entity: "sensor.heat_pump_pilot_decision"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#38BDF8"
+    stroke_width: 1
+    stroke_dash: 4
+    extend_to: false
+    show:
+      legend_value: false
+      in_header: false
+    data_generator: |-
+      const d = entity?.attributes || {}; const arr = d.outdoor_forecast || []; const t0 = Date.parse(d.last_control_time || ""); const dt = 15 * 60 * 1000; if (!Number.isFinite(t0) || !Array.isArray(arr) || !arr.length) return []; const cutoff = Date.now() - dt; return arr
+        .map((v, i) => [t0 + i * dt, (v === null || v === undefined || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null))])
+        .filter(p => p[0] >= cutoff);
+    unit: "°C"
+    curve: "straight"
+  -
+    name: "Virtual outdoor (planned)"
+    entity: "sensor.heat_pump_pilot_decision"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#FBBF24"
+    stroke_width: 1
+    stroke_dash: 2
+    curve: "stepline"
+    extend_to: false
+    show:
+      legend_value: false
+      in_header: false
+    data_generator: |-
+      const d = entity?.attributes || {}; const arr = d.planned_virtual_outdoor_temperatures || []; const t0 = Date.parse(d.last_control_time || ""); const dt = 15 * 60 * 1000; if (!Number.isFinite(t0) || !Array.isArray(arr) || !arr.length) return []; const cutoff = Date.now() - dt; return arr
+        .map((v, i) => [t0 + i * dt, (v === null || v === undefined || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) : null))])
+        .filter(p => p[0] >= cutoff);
+    unit: "°C"
+  -
+    name: "Virtual outdoor"
+    entity: "sensor.heat_pump_pilot_virtual_outdoor"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#F59E0B"
+    stroke_width: 1
+    curve: "stepline"
+    show:
+      in_header: "raw"
+      legend_value: false
+    unit: "°C"
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n : null;"
+  -
+    name: "Electricity price"
+    entity: "sensor.electricity_price"
+    type: "line"
+    yaxis_id: "price"
+    color: "#7C3AED"
+    stroke_width: 1.2
+    curve: "stepline"
+    extend_to: "now"
+    show:
+      in_header: "raw"
+      legend_value: false
+    unit: "SEK/kWh"
+    float_precision: 3
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n : null;"
+  -
+    name: "Published upcoming prices"
+    entity: "sensor.electricity_price"
+    type: "line"
+    yaxis_id: "price"
+    color: "#6D28D9"
+    stroke_width: 1
+    stroke_dash: 2
+    curve: "stepline"
+    extend_to: false
+    show:
+      legend_value: false
+      in_header: false
+    data_generator: |-
+      const a = entity?.attributes || {};
+      const rows = [...(Array.isArray(a.raw_today) ? a.raw_today : []), ...(Array.isArray(a.raw_tomorrow) ? a.raw_tomorrow : [])];
+      const now = Date.now();
+      const rowsByStart = new Map();
+      for (const p of rows) {
+        if (!p || p.value === null || p.value === undefined || p.value === '') continue;
+        const t = Date.parse(p.start), end = Date.parse(p.end), v = Number(p.value);
+        if (Number.isFinite(t) && Number.isFinite(end) && end > t && Number.isFinite(v) && end > now) rowsByStart.set(t, {t, end, v});
+      }
+      const sorted = [...rowsByStart.values()].sort((a,b) => a.t-b.t);
+      const result = [];
+      let previousEnd = null;
+      for (const p of sorted) {
+        if (previousEnd !== null && p.t > previousEnd) result.push([previousEnd, null]);
+        result.push([Math.max(p.t, now), p.v], [p.end - 1, p.v]);
+        previousEnd = p.end;
+      }
+      return result;
+    unit: "SEK/kWh"
+    float_precision: 3
+  -
+    name: "Price baseline"
+    entity: "sensor.heat_pump_pilot_decision"
+    type: "line"
+    yaxis_id: "price"
+    color: "#C4B5FD"
+    stroke_width: 1
+    stroke_dash: 0
+    extend_to: "now"
+    show:
+      legend_value: false
+      in_header: false
+    unit: "SEK/kWh"
+    float_precision: 3
+    curve: "stepline"
+    attribute: "price_baseline"
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n : null;"
+  -
+    name: "Price absolute low"
+    entity: "sensor.heat_pump_pilot_decision"
+    type: "line"
+    yaxis_id: "price"
+    color: "#E5A0CA"
+    stroke_width: 1
+    stroke_dash: 4
+    extend_to: "now"
+    show:
+      legend_value: false
+      in_header: false
+      hidden_by_default: true
+    unit: "SEK/kWh"
+    float_precision: 3
+    curve: "stepline"
+    attribute: "price_absolute_low_threshold"
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n : null;"
+  -
+    name: "Current target (reference)"
+    entity: "climate.heat_pump_pilot"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#9CA3AF"
+    stroke_width: 1
+    stroke_dash: 6
+    extend_to: false
+    show:
+      legend_value: false
+      in_header: false
+    unit: "°C"
+    curve: "stepline"
+    data_generator: "const x = entity?.attributes?.temperature; if (x === null || x === undefined || x === '') return []; const v = Number(x); if (!Number.isFinite(v)) return []; return [[Date.now(),v],[Date.now()+24*3600000,v]];"
+  -
+    name: "Planned heating request"
+    entity: "sensor.heat_pump_pilot_decision"
+    type: "line"
+    yaxis_id: "request_activity"
+    color: "#FCA5A5"
+    stroke_width: 1
+    stroke_dash: 2
+    curve: "stepline"
+    extend_to: false
+    show:
+      legend_value: false
+      in_header: false
+      hidden_by_default: true
+    data_generator: |-
+      const d = entity?.attributes || {}; const arr = d.planned_requested_duty || []; const t0 = Date.parse(d.last_control_time || ""); const dt = 15 * 60 * 1000; if (!Number.isFinite(t0) || !Array.isArray(arr) || !arr.length) return []; const cutoff = Date.now() - dt; return arr
+        .map((v, i) => [t0 + i * dt, (v === null || v === undefined || v === '' ? null : (Number.isFinite(Number(v)) ? Number(v) * 100 : null))])
+        .filter(p => p[0] >= cutoff);
+    unit: "%"
+    float_precision: 0
+    opacity: 1
+  -
+    entity: "sensor.heat_pump_pilot_decision"
+    yaxis_id: "binary"
+    color: "#F97316"
+    extend_to: "now"
+    float_precision: 0
+    unit: "%"
+    show:
+      in_header: false
+      legend_value: false
+    name: "Summer override active"
+    type: "area"
+    attribute: "summer_heat_window_override_active"
+    curve: "stepline"
+    stroke_width: 1
+    opacity: 0.1
+    transform: "return (x === true || x === 'true') ? 100 : (x === false || x === 'false') ? 0 : null;"
+  -
+    entity: "sensor.heat_pump_pilot_decision"
+    yaxis_id: "binary"
+    color: "#F97316"
+    extend_to: false
+    float_precision: 0
+    unit: "%"
+    show:
+      in_header: false
+      legend_value: false
+    name: "Summer window start"
+    type: "line"
+    curve: "straight"
+    stroke_width: 1.5
+    stroke_dash: 5
+    data_generator: "const d = entity?.attributes || {}; const a = Date.parse(d.summer_heat_window_selected_start || ''); const b = Date.parse(d.summer_heat_window_selected_end || ''); if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return []; const t = Date.parse(d.summer_heat_window_selected_start || ''); return [[t,0],[t,100]];"
+  -
+    entity: "sensor.heat_pump_pilot_decision"
+    yaxis_id: "binary"
+    color: "#F97316"
+    extend_to: false
+    float_precision: 0
+    unit: "%"
+    show:
+      in_header: false
+      legend_value: false
+    name: "Summer window end"
+    type: "line"
+    curve: "straight"
+    stroke_width: 1.5
+    stroke_dash: 5
+    data_generator: "const d = entity?.attributes || {}; const a = Date.parse(d.summer_heat_window_selected_start || ''); const b = Date.parse(d.summer_heat_window_selected_end || ''); if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return []; const t = Date.parse(d.summer_heat_window_selected_end || ''); return [[t,0],[t,100]];"
+  -
+    name: "UFH pump 1"
+    entity: "switch.ufh_pump_1"
+    type: "line"
+    yaxis_id: "ufh_activity_0"
+    color: "#2DD4BF"
+    curve: "stepline"
+    stroke_width: 1
+    opacity: 1
+    unit: ""
+    float_precision: 0
+    extend_to: "now"
+    fill_raw: "null"
+    show:
+      in_header: false
+      legend_value: false
+    transform: "return x === 'on' ? 1 : x === 'off' ? 0 : null;"
+  -
+    name: "UFH pump 2"
+    entity: "switch.ufh_pump_2"
+    type: "line"
+    yaxis_id: "ufh_activity_1"
+    color: "#F472B6"
+    curve: "stepline"
+    stroke_width: 1
+    opacity: 1
+    unit: ""
+    float_precision: 0
+    extend_to: "now"
+    fill_raw: "null"
+    show:
+      in_header: false
+      legend_value: false
+    transform: "return x === 'on' ? 1 : x === 'off' ? 0 : null;"
+  -
+    name: "Heat-pump supply"
+    entity: "sensor.heat_pump_supply_temperature"
+    type: "line"
+    yaxis_id: "temp"
+    color: "#FB7185"
+    curve: "stepline"
+    stroke_width: 1
+    unit: "°C"
+    float_precision: 1
+    extend_to: "now"
+    fill_raw: "null"
+    show:
+      in_header: false
+      legend_value: false
+      hidden_by_default: true
+    transform: "if (x === null || x === undefined || x === '' || x === 'unknown' || x === 'unavailable') return null; const n = Number(x); return Number.isFinite(n) ? n : null;"
+update_interval: "1min"
+update_delay: "3s"
+experimental:
+  hidden_by_default: true

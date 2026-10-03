@@ -17,7 +17,8 @@ Repository: https://github.com/andox/heat-pump-pilot
 
 ## Features
 - MPC optimizer with price vs comfort weighting and optional learned pump delay.
-- Virtual outdoor temperature control with price-aware warm bias.
+- Price-aware preheating and coasting within a configurable comfort band.
+- Optional independent UFH circulation control and daily pump exercise.
 - Hourly adaptive house learning with heat loss, heating gain and background warmth; legacy EKF/RLS remain available.
 - Optional heating detection via supply/flow temperature sensor.
 - Diagnostic sensors for decisions, health, learning state, price state, and scores.
@@ -43,6 +44,7 @@ Required entities:
 - Indoor temperature sensor (`sensor.*`).
 - Outdoor temperature sensor (`sensor.*`).
 - Price sensor (`sensor.*`).
+- Weather forecast entity (`weather.*`); current outdoor readings are the fallback if its forecast is unavailable.
 
 Optional entities:
 - Controlled entity (the output target you want the integration to drive).
@@ -64,8 +66,8 @@ reliable heat signal exists, learning is disabled.
 
 Everyday comfort settings appear first, followed by **Sensors and heat pump**.
 Advanced settings are in collapsed groups at the bottom: control, prices,
-learning, detection, initial estimates and diagnostics. Existing
-options retain their original storage keys.
+learning, detection, initial estimates, diagnostics and optional UFH control/exercise.
+Existing options retain their original storage keys.
 
 ## Configuration options and defaults
 Below are the main options exposed in the config/option flows, with defaults and
@@ -73,8 +75,8 @@ recommended values when you’re unsure. Values are in the UI unless noted.
 
 Core control:
 - Target temperature (default: 21.0°C): your comfort setpoint; set to your normal desired indoor temp.
-- Price priority (default: 0.5): 0.0 = comfort only, 1.0 = price only; common range is 0.4-0.6.
-- Price penalty curve (default: linear): shapes how prices above the baseline are penalized (linear = proportional, sqrt = gentler, quadratic = stronger).
+- Price priority (default: 0.5): lower values favor staying near target; higher values favor cheaper heating and coasting inside the comfort band. Band violations are ranked first, even at 1.0.
+- Price penalty curve (default: linear): shapes the excess price ratio above baseline; see the formulas below for linear, sqrt and quadratic.
 - Price baseline window (default: 24 h): how much timestamped observed history
   is used alongside known future prices when scaling prices (24/48/72 h).
   The median includes zero and negative prices; the normalization baseline has
@@ -115,7 +117,7 @@ Further control options:
   window overrides idle.
 - Control interval (default: 15 min): how often MPC runs; keep 15-30 min unless you have slow sensors.
 - Prediction horizon (default: 24 h): MPC planning horizon; 12-24 h is typical.
-- Comfort tolerance (default: 1.0°C): deadband before comfort penalty; 0.5-1.5°C is typical.
+- Comfort tolerance (default: 1.0°C): predicted allowed range is target ± tolerance. A wider band gives MPC more room to preheat and coast; the target remains preferred.
 - Monitor only (default: false): true to disable control actions.
 
 Virtual outdoor control:
@@ -140,7 +142,7 @@ Learning:
 
 Heating detection:
 - Heating supply/flow temp entity (default: unset): optional but strongly recommended for better learning.
-- Heating detection enabled (default: false unless a sensor is set).
+- Heating detection enabled (default: true): active only when a supply/flow sensor is configured.
 - Supply temp threshold (default: 30°C): set to your pump’s “heating on” supply threshold.
 - Supply temp hysteresis (default: 1.0°C): helps avoid chatter.
 - Supply temp debounce (default: 60 s): helps avoid false positives on short spikes.
@@ -148,27 +150,6 @@ Heating detection:
 
 Performance metrics:
 - Performance window (default: 24 h): 6/12/24/48/72/96 hours; 24–48 h is a good balance.
-
-## Quick presets (starter values)
-These are starting points; adjust after 1–2 days of data.
-
-Comfort‑first:
-- Price priority: 0.30
-- Price penalty curve: sqrt
-- Comfort tolerance: 0.5–1.0°C
-- Virtual outdoor heat offset: 3–6°C
-
-Balanced:
-- Price priority: 0.50
-- Price penalty curve: linear
-- Comfort tolerance: 0.8–1.2°C
-- Virtual outdoor heat offset: 4–8°C
-
-Price‑first:
-- Price priority: 0.70
-- Price penalty curve: quadratic
-- Comfort tolerance: 1.0–1.5°C
-- Virtual outdoor heat offset: 6–10°C
 
 ## Planning comfort, preheating and coasting
 
@@ -258,7 +239,10 @@ If you only have a `weather.*` entity, create a template sensor:
 template:
   - sensor:
       - name: "Outdoor Temperature"
-        unit_of_measurement: "C"
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        availability: "{{ is_number(state_attr('weather.home', 'temperature')) }}"
         state: "{{ state_attr('weather.home', 'temperature') }}"
 ```
 
@@ -275,7 +259,8 @@ Intervals pair indoor temperature change with time-weighted outdoor temperature
 and heating during the same period. At least 95% coverage is required. Unknown
 states, runtime gaps over five minutes and temperature jumps above 2°C/hour are
 excluded. Partial intervals are discarded after restart. Unchanged readings are
-held; this cannot detect a sensor that silently stops reporting.
+held. The separate 24-hour sensor-input warning checks reporting timestamps,
+not whether a value changes (see Sensors and diagnostics).
 
 All models need measured heating: supply/flow temperature with threshold,
 hysteresis, debounce and on/off margins, or the controlled switch/climate state.
@@ -405,24 +390,25 @@ See [the offline replay tool](tools/README.md) for comparisons using exported
 Home Assistant history.
 
 ## Price baseline and classification
-The integration uses a single baseline for both MPC and classification:
-- **Unified baseline**: median of `price_forecast + price_history_window`, where
-  `price_history_window` is the last 24/48/72 hours of observed prices.
-  Non-positive prices are ignored and a small floor is used to avoid skew.
-The window length is controlled by **Price baseline window** in the options flow.
-Classification can also apply an **Absolute low-price threshold**. When set, any
-current price at or below the threshold will never classify above `normal`.
-Set it to `auto` to use the median of the configured history window (7/14/30 days),
-or `off` to disable the hybrid cap.
-On a fresh install, the `auto` threshold may be `None` until enough history is
-available; the cap is disabled until the history builds.
+MPC and price classification use the same normalization baseline:
+`max(0.01, median(known forecast prices + timestamped observed history))`.
+The history and forecast portions are bounded by the configured 24/48/72-hour
+baseline window. Zero and negative prices participate in the median; missing
+prices are excluded. The positive floor is in the configured price units.
 
-Price-aware penalties only apply when `price_ratio > 1.0` (current price above baseline).
-The ratio is capped (default `3.0`) before applying the curve, and all curves are
-monotonic, so higher prices never reduce the penalty. The curve works alongside
-`price_comfort_weight`: higher weight magnifies the curve's impact on optimization.
-If you want gentle shifts, use `sqrt`; for aggressive avoidance of spikes, use
-`quadratic`; `linear` is a balanced default.
+The **Absolute low-price threshold** caps classification at `normal`; it does
+not force heating. `auto` uses the median of available history within the
+configured 7/14/30-day window, including zero and negative prices. `off` disables
+the cap. It is unavailable until there is usable history, then uses what has
+actually been observed without pretending the whole window is covered.
+
+MPC prices below baseline retain their price ratio. Above baseline, set
+`x = min(ratio, 3) - 1`; the shaped value is `1 + x` (linear), `1 + sqrt(x)`
+or `1 + x²` (quadratic). The curves shape only the excess above baseline;
+`sqrt` is stronger than linear for excesses below one and gentler above one,
+while quadratic does the reverse. Price weight multiplies this term, after
+predicted comfort-band violations have been ranked. The planning cost is not a
+metered currency estimate.
 
 Classification uses `ratio = current_price / baseline` with labels:
 - `< 0.75` -> `very_low`
@@ -433,20 +419,30 @@ Classification uses `ratio = current_price / baseline` with labels:
 - `>= 1.60` -> `extreme`
 
 ## Performance metrics
-Performance is computed over a configurable window (6/12/24/48/72/96 hours):
-- **Comfort score**: percent of samples within comfort tolerance.
-- **Price score**: how often heating occurs during low prices
-  (based on average price while heating vs min/max prices).
-- **Prediction accuracy**: MAE/RMSE/bias from MPC temperature predictions.
 
-These metrics are persisted and survive restarts.
+The configurable performance window is 6/12/24/48/72/96 hours. Observations
+are weighted by elapsed time; long gaps remain uncovered.
+
+- **Comfort score**: percentage of covered time within target ± tolerance,
+  with separate too-cold/too-warm percentages and degree-hours outside the band.
+- **Price score**: detected heating timing compared with the cheapest and most
+  expensive allocations of the same heating duration. 50 means heating at the
+  average available price; no heating or no meaningful price comparison gives
+  an unknown score with a reason. It does not measure electricity saved.
+- **Prediction accuracy**: indoor-temperature MAE, with RMSE, bias and maximum
+  error. It compares observations against prior plans, not a completed 24-hour
+  forecast backtest. Positive bias means actual temperature exceeded prediction.
+
+Performance samples survive restarts. Inspect coverage before interpreting a
+score; short heating cycles can be missed between control-loop observations.
 
 ## Early-run behavior (history builds)
 Some features depend on stored history and will be less informative on day one:
-- **Absolute low-price threshold (auto)**: needs up to the configured window (7/14/30 days) of price history.
+- **Absolute low-price threshold (auto)**: uses the available portion of its configured 7/14/30-day history window.
 - **Price/comfort/accuracy scores**: need enough performance samples to be meaningful.
-- **Learning state / curve recommendation**: require samples from the learning window.
-These stabilize after 1–2 days of operation, and continue to improve with more data.
+- **House learning**: requires usable completed intervals and temperature variation; heating gain also needs measured heating and coasting.
+- **Pump response / curve recommendation**: require relevant heating/request evidence.
+Elapsed days alone do not prove convergence or qualify a learned model for MPC.
 
 ## Persistence and restart behavior
 The integration stores its state in `.storage`:
@@ -469,23 +465,24 @@ The warning clears when valid reports resume. This notification threshold does
 not change the separate, configurable UFH pump safety freshness limit.
 
 Key diagnostic sensors:
-- Heat Pump Pilot Decision: last MPC action plus forecast/plan details, including:
-  `overshoot_warm_bias_enabled`, `overshoot_warm_bias_curve`,
-  `overshoot_warm_bias_min_bias`, `overshoot_warm_bias_max_bias`,
-  `overshoot_warm_bias_applied`, and `overshoot_warm_bias_multiplier`.
-  In continuous mode, `suggested_heat_on` is the raw first binary MPC step for
-  compatibility; use `effective_requested_duty_ratio`,
-  `effective_heat_request_state`, `anti_chatter_limited`, and
-  `raw_mpc_sequence_head` to understand the actual applied request.
-  Large arrays (price history/forecast, outdoor forecast, planned temps) are capped
-  to the most recent 192 entries to stay under recorder limits.
+- Heat Pump Pilot Decision: last applied request and forecasts. Use
+  `effective_requested_duty_ratio` and `effective_heat_request_state` for the
+  request, `heating_detected` for measured heating, and `planning_model`,
+  `planned_comfort_status`, `comfort_lower_bound` / `comfort_upper_bound` and
+  `planned_comfort_violation_degree_hours` for the plan. `predicted_heating`
+  differs from `planned_requested_duty` when delivery is delayed.
+  `pump_response_planning_active` means the latest plan used validated response
+  learning; collecting observations alone does not make it active.
+  Legacy warm-bias/anti-chatter attributes remain for compatibility and are
+  not useful overlays for normal command-aware planning.
+  Price, outdoor and plan series are capped at 192 entries for Recorder.
 - Heat Pump Pilot Health: overall health with reasons (missing sensors, stale control, etc).
 - Curve recommendation (Health attribute): suggests when to raise/lower the heat pump curve
   based on heating detected during low requested heat vs active requested heat over the
   performance window. In continuous mode this uses requested duty ratio (not only on/off),
   so small non-zero preheating is not treated as true idle.
 - Heat Pump Pilot Control State: whether the integration is controlling or monitoring.
-- Heat Pump Pilot Learning State: learning vs stable, with change ratios and window stats.
+- Heat Pump Pilot Learning State: adaptive fitting status, gain identification, interval coverage and fit error. Legacy EKF/RLS also expose change ratios; frozen gain is not convergence.
 - Heat Pump Pilot Price State: current price classification and baseline details.
 - Heat Pump Pilot Virtual Outdoor: the current virtual outdoor temperature sent to the pump.
 - Heat Pump Pilot Virtual Outdoor Trace: rolling history of recent virtual outdoor decisions
@@ -517,558 +514,70 @@ average price during detected heating; it is not a metered saving. Price scores
 from this method (`equal_runtime_price_opportunity_v2`) are not directly
 comparable to older scores based on the minimum/maximum price alone.
 
-## Dashboard card (example)
-This grid card is safe to paste into a Lovelace dashboard.
+## Dashboard examples
 
-Notes about entities:
-- From this integration: `climate.heat_pump_pilot`, `sensor.heat_pump_pilot_*`,
-  `binary_sensor.heat_pump_pilot_heating_detected`.
-- From your own setup: `sensor.ground_source_heat_pump` (supply/flow temperature). If you
-  don’t have one, remove that line from the Temperatures graph.
+The examples use placeholder entity IDs: replace indoor/outdoor, electricity
+price, supply-temperature and optional UFH switch IDs with your own. Pilot
+entity IDs may also differ when you have renamed entities or use several instances.
 
-```yaml
-square: false
-type: grid
-columns: 1
-cards:
-  - type: thermostat
-    entity: climate.heat_pump_pilot
-    name: Heat Pump Pilot
-    show_current_as_primary: true
-  - type: entities
-    title: Scores
-    entities:
-      - entity: sensor.heat_pump_pilot_comfort_score
-        name: Comfort Score
-        secondary_info: last-changed
-      - entity: sensor.heat_pump_pilot_price_score
-        name: Price Score
-        secondary_info: last-changed
-      - entity: sensor.heat_pump_pilot_prediction_accuracy
-        name: Prediction MAE
-        secondary_info: last-changed
-    show_header_toggle: false
-    state_color: false
-  - type: entities
-    title: Score Details
-    show_header_toggle: false
-    entities:
-      - type: attribute
-        entity: sensor.heat_pump_pilot_comfort_score
-        attribute: within_tolerance_pct
-        name: Comfort within tolerance (%)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_comfort_score
-        attribute: mean_abs_error
-        name: Comfort MAE (°C)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_comfort_score
-        attribute: max_abs_error
-        name: Comfort max error (°C)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_price_score
-        attribute: heating_ratio
-        name: Heating ratio
-      - type: attribute
-        entity: sensor.heat_pump_pilot_price_score
-        attribute: avg_price_when_heating
-        name: Avg price when heating
-      - type: attribute
-        entity: sensor.heat_pump_pilot_price_score
-        attribute: min_price
-        name: Min price
-      - type: attribute
-        entity: sensor.heat_pump_pilot_price_score
-        attribute: max_price
-        name: Max price
-      - type: attribute
-        entity: sensor.heat_pump_pilot_prediction_accuracy
-        attribute: rmse
-        name: Prediction RMSE (°C)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_prediction_accuracy
-        attribute: bias
-        name: Prediction bias (°C)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_prediction_accuracy
-        attribute: max_abs_error
-        name: Prediction max error (°C)
-  - type: history-graph
-    title: Temperatures
-    hours_to_show: 24
-    entities:
-      - entity: sensor.heat_pump_pilot_virtual_outdoor
-        name: Virtual Outdoor
-      - entity: sensor.ground_source_heat_pump
-        name: Supply Temp
-      - entity: climate.heat_pump_pilot
-        name: Pilot
-  - type: entities
-    title: Diagnostics
-    entities:
-      - entity: sensor.heat_pump_pilot_decision
-        secondary_info: last-changed
-      - entity: sensor.heat_pump_pilot_health
-        secondary_info: last-changed
-      - type: attribute
-        entity: sensor.heat_pump_pilot_health
-        attribute: curve_recommendation
-        name: Curve recommendation
-      - entity: sensor.heat_pump_pilot_virtual_outdoor_trace
-        name: Virtual outdoor trace
-      - entity: sensor.heat_pump_pilot_control_state
-        secondary_info: last-changed
-      - entity: sensor.heat_pump_pilot_learning_state
-        secondary_info: last-changed
-      - entity: sensor.heat_pump_pilot_price_state
-        secondary_info: last-changed
-      - type: attribute
-        entity: sensor.heat_pump_pilot_decision
-        attribute: price_absolute_low_threshold
-        name: Price low threshold
-      - type: attribute
-        entity: sensor.heat_pump_pilot_decision
-        attribute: price_absolute_low_threshold_kind
-        name: Price low threshold kind
-      - entity: binary_sensor.heat_pump_pilot_heating_detected
-        secondary_info: last-changed
-    show_header_toggle: false
-    state_color: true
-  - type: entities
-    title: Curve Recommendation Details
-    show_header_toggle: false
-    entities:
-      - type: attribute
-        entity: sensor.heat_pump_pilot_health
-        attribute: curve_recommendation_details
-        name: Curve recommendation details
-  - type: entities
-    title: Model Estimates
-    show_header_toggle: false
-    entities:
-      - type: attribute
-        entity: climate.heat_pump_pilot
-        attribute: estimated_heat_loss_coefficient
-        name: Estimated heat loss
-      - type: attribute
-        entity: climate.heat_pump_pilot
-        attribute: estimated_heat_gain_coefficient
-        name: Estimated heat gain
-      - type: attribute
-        entity: climate.heat_pump_pilot
-        attribute: estimated_indoor_temperature
-        name: Estimated indoor temp
-  - type: entities
-    title: Learning Details
-    show_header_toggle: false
-    entities:
-      - type: attribute
-        entity: sensor.heat_pump_pilot_learning_state
-        attribute: samples
-        name: Samples (window)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_learning_state
-        attribute: window_hours
-        name: Window (hours)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_learning_state
-        attribute: loss_change_ratio
-        name: Loss change ratio
-      - type: attribute
-        entity: sensor.heat_pump_pilot_learning_state
-        attribute: gain_change_ratio
-        name: Gain change ratio
-      - type: attribute
-        entity: sensor.heat_pump_pilot_learning_state
-        attribute: first_sample_time
-        name: First sample time
-      - type: attribute
-        entity: sensor.heat_pump_pilot_learning_state
-        attribute: last_sample_time
-        name: Last sample time
-      - type: attribute
-        entity: sensor.heat_pump_pilot_decision
-        attribute: heating_duty_cycle_ratio
-        name: Heating duty cycle ratio
-      - type: attribute
-        entity: sensor.heat_pump_pilot_decision
-        attribute: continuous_control_duty_ratio
-        name: Continuous duty ratio
-      - type: attribute
-        entity: sensor.heat_pump_pilot_decision
-        attribute: overshoot_warm_bias_applied
-        name: Back-off applied (°C)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_decision
-        attribute: overshoot_warm_bias_curve
-        name: Back-off curve
-      - type: attribute
-        entity: sensor.heat_pump_pilot_decision
-        attribute: overshoot_warm_bias_min_bias
-        name: Back-off min (°C)
-      - type: attribute
-        entity: sensor.heat_pump_pilot_decision
-        attribute: overshoot_warm_bias_max_bias
-        name: Back-off max (°C)
-```
+- [ApexCharts overview](docs/dashboard_overview.yaml): current temperatures,
+  predicted indoor/virtual/outdoor values, historical price baseline and future
+  published prices. It follows the refreshed screenshot, with thin strokes,
+  tooltips, a line for now without a label, and small activity lanes.
+  Heating/request, absolute-low-price and supply-temperature series start hidden;
+  click their legends to inspect them. Optional UFH lanes and summer-window
+  markers are included; remove the UFH/supply series if you do not use them.
+- [Pilot status and learning](docs/dashboard_details.yaml): a compact built-in
+  card stack for current scores, adaptive coefficients, evidence and plan status.
+  It needs no custom frontend card.
 
-## ApexCharts overview (continuous-control example)
-This ApexCharts card shows indoor/virtual/outdoor temperatures alongside Nordpool prices.
-It is tuned for the current integration behavior where `suggested_heat_on` is the raw
-first MPC step, while `effective_requested_duty_ratio` is the actual effective request
-used to drive virtual outdoor control in continuous mode.
-Replace entity IDs with your own sensors/entities (indoor temp, outdoor temp, Nordpool, etc.).
+Install [ApexCharts Card](https://github.com/RomRider/apexcharts-card) for the
+first example, then paste its YAML into a manual dashboard card. The price
+forecast series expects Nordpool-style `raw_today` / `raw_tomorrow` entries with
+`start`, `end` and `value`; remove that series for other price providers.
+The actual price and baseline history still work without those attributes.
+Forecast arrays use Pilot's 15-minute MPC grid, not the sensor update interval.
 
-```yaml
-type: custom:apexcharts-card
-header:
-  title: Heat Pump Pilot — Overview
-  show_states: true
-  colorize_states: true
-graph_span: 48h
-span:
-  start: hour
-  offset: "-24h"
-now:
-  show: true
-all_series_config:
-  extend_to: now
-apex_config:
-  grid:
-    show: true
-    strokeDashArray: 0.11
-  chart:
-    height: 500
-    animations:
-      enabled: false
-  stroke:
-    width: 1.4
-    curve: smooth
-  markers:
-    size: 0
-  tooltip:
-    shared: true
-    intersect: false
-  legend:
-    show: true
-    position: bottom
-    fontSize: 11px
-    itemMargin:
-      horizontal: 10
-      vertical: 2
-yaxis:
-  - id: temp
-    min: -10
-    decimals: 1
-    apex_config:
-      title:
-        text: Temp (°C)
-  - id: outdoor
-    show: false
-    min: -10
-    max: 25
-    decimals: 1
-  - id: virt
-    show: false
-    min: -10
-    max: 25
-    decimals: 1
-  - id: price
-    opposite: true
-    min: -0.1
-    decimals: 2
-    apex_config:
-      title:
-        text: Price (SEK/kWh)
-  - id: binary
-    opposite: true
-    show: false
-    min: -0.05
-    max: 1.05
-    decimals: 2
-    apex_config:
-      title:
-        text: Request / Heat
-series:
-  - name: Heat detected
-    entity: binary_sensor.heat_pump_pilot_heating_detected
-    type: area
-    yaxis_id: binary
-    color: "#94A3B8"
-    stroke_width: 1
-    curve: stepline
-    opacity: 0.14
-    group_by:
-      duration: 5min
-      func: max
-    transform: "return (x === 'on' || x === true) ? 1 : 0;"
-    show:
-      legend_value: false
-  - name: Requested duty ratio
-    entity: sensor.heat_pump_pilot_decision
-    attribute: effective_requested_duty_ratio
-    type: area
-    yaxis_id: binary
-    color: "#EF4444"
-    stroke_width: 1
-    curve: stepline
-    opacity: 0.28
-    group_by:
-      duration: 5min
-      func: max
-    transform: "return Number.isFinite(Number(x)) ? Number(x) : null;"
-    show:
-      legend_value: false
-  - name: Raw MPC first step
-    entity: sensor.heat_pump_pilot_decision
-    type: line
-    yaxis_id: binary
-    color: "#F87171"
-    stroke_width: 1
-    curve: stepline
-    stroke_dash: 4
-    group_by:
-      duration: 5min
-      func: max
-    transform: "return (x === 'heat_on') ? 1 : 0;"
-    show:
-      legend_value: false
-  - name: Anti-chatter limited
-    entity: sensor.heat_pump_pilot_decision
-    attribute: anti_chatter_limited
-    type: line
-    yaxis_id: binary
-    color: "#FB7185"
-    stroke_width: 1
-    stroke_dash: 2
-    curve: stepline
-    group_by:
-      duration: 5min
-      func: max
-    transform: "return (x === true || x === 'true') ? 0.08 : 0;"
-    show:
-      legend_value: false
-  - name: Indoor (sensor)
-    entity: sensor.sonoff_snzb_02d_temperature
-    type: line
-    yaxis_id: temp
-    color: "#22C55E"
-    group_by:
-      duration: 15min
-      func: avg
-    show:
-      in_header: true
-      legend_value: false
-  - name: Indoor predicted
-    entity: sensor.heat_pump_pilot_decision
-    type: line
-    yaxis_id: temp
-    color: "#16A34A"
-    stroke_dash: 2
-    stroke_width: 1
-    extend_to: false
-    show:
-      legend_value: false
-    data_generator: >
-      const d = entity?.attributes || {}; const arr = d.predicted_temperatures
-      || []; const t0 = Date.parse(d.last_control_time || ""); const dt = 15 *
-      60 * 1000; if (!t0 || !arr.length) return []; const cutoff = Date.now() -
-      dt; return arr
-        .map((v, i) => [t0 + i * dt, Number(v)])
-        .filter(p => Number.isFinite(p[1]) && p[0] >= cutoff);
-  - name: Target (setpoint)
-    entity: climate.heat_pump_pilot
-    type: line
-    yaxis_id: temp
-    color: "#9CA3AF"
-    stroke_width: 1
-    stroke_dash: 4
-    extend_to: false
-    show:
-      legend_value: false
-    data_generator: >
-      const t = Number(entity?.attributes?.temperature); if
-      (!Number.isFinite(t)) return []; const now = Date.now(); return [[now - 24
-      * 60 * 60 * 1000, t], [now + 24 * 60 * 60 * 1000, t]];
-  - name: Outdoor (sensor)
-    entity: sensor.outdoor_temperature
-    type: line
-    yaxis_id: outdoor
-    color: "#38BDF8"
-    stroke_width: 1
-    group_by:
-      duration: 15min
-      func: avg
-    show:
-      in_header: true
-      legend_value: false
-  - name: Outdoor forecast
-    entity: sensor.heat_pump_pilot_decision
-    type: line
-    yaxis_id: outdoor
-    color: "#0EA5E9"
-    stroke_width: 2
-    stroke_dash: 4
-    extend_to: false
-    show:
-      legend_value: false
-    data_generator: >
-      const d = entity?.attributes || {}; const arr = d.outdoor_forecast || [];
-      const t0 = Date.parse(d.last_control_time || ""); const dt = 15 * 60 *
-      1000; if (!t0 || !arr.length) return []; const cutoff = Date.now() - dt;
-      return arr
-        .map((v, i) => [t0 + i * dt, Number(v)])
-        .filter(p => Number.isFinite(p[1]) && p[0] >= cutoff);
-  - name: Virtual outdoor (planned)
-    entity: sensor.heat_pump_pilot_decision
-    type: line
-    yaxis_id: virt
-    color: "#FBBF24"
-    stroke_width: 1
-    stroke_dash: 2
-    curve: stepline
-    extend_to: false
-    show:
-      legend_value: false
-    data_generator: >
-      const d = entity?.attributes || {}; const arr =
-      d.planned_virtual_outdoor_temperatures || []; const t0 =
-      Date.parse(d.last_control_time || ""); const dt = 15 * 60 * 1000; if (!t0
-      || !arr.length) return []; const cutoff = Date.now() - dt; return arr
-        .map((v, i) => [t0 + i * dt, Number(v)])
-        .filter(p => Number.isFinite(p[1]) && p[0] >= cutoff);
-  - name: Virtual outdoor
-    entity: sensor.heat_pump_pilot_virtual_outdoor
-    type: line
-    yaxis_id: virt
-    color: "#F59E0B"
-    stroke_width: 2
-    curve: stepline
-    show:
-      in_header: true
-      legend_value: false
-  - name: Warm-bias applied
-    entity: sensor.heat_pump_pilot_decision
-    type: line
-    yaxis_id: virt
-    color: "#D97706"
-    stroke_dash: 8
-    stroke_width: 1
-    opacity: 0.15
-    extend_to: false
-    show:
-      legend_value: false
-    data_generator: >
-      const applied = Number(entity?.attributes?.overshoot_warm_bias_applied);
-      if (!Number.isFinite(applied)) return []; const now = Date.now(); return
-      [[now - 24 * 60 * 60 * 1000, applied], [now + 24 * 60 * 60 * 1000,
-      applied]];
-  - name: Nordpool (actual)
-    entity: sensor.nordpool_kwh_se3_sek_3_10_025
-    type: line
-    yaxis_id: price
-    color: "#7C3AED"
-    stroke_width: 1.2
-    curve: stepline
-    extend_to: now
-    show:
-      in_header: true
-      legend_value: false
-    data_generator: >
-      const now = Date.now(); const a = entity?.attributes || {}; const today =
-      Array.isArray(a.raw_today) ? a.raw_today : []; const tomorrow =
-      Array.isArray(a.raw_tomorrow) ? a.raw_tomorrow : []; return [...today,
-      ...tomorrow]
-        .filter(p => p && p.start && p.value !== undefined)
-        .map(p => [new Date(p.start).getTime(), Number(p.value)])
-        .filter(p => Number.isFinite(p[1]) && p[0] <= now);
-  - name: Nordpool (forecast)
-    entity: sensor.nordpool_kwh_se3_sek_3_10_025
-    type: line
-    yaxis_id: price
-    color: "#6D28D9"
-    stroke_width: 1
-    stroke_dash: 2
-    curve: stepline
-    extend_to: false
-    show:
-      legend_value: false
-    data_generator: >
-      const now = Date.now(); const a = entity?.attributes || {}; const today =
-      Array.isArray(a.raw_today) ? a.raw_today : []; const tomorrow =
-      Array.isArray(a.raw_tomorrow) ? a.raw_tomorrow : []; return [...today,
-      ...tomorrow]
-        .filter(p => p && p.start && p.value !== undefined)
-        .map(p => [new Date(p.start).getTime(), Number(p.value)])
-        .filter(p => Number.isFinite(p[1]) && p[0] >= now);
-  - name: Price baseline
-    entity: sensor.heat_pump_pilot_decision
-    type: line
-    yaxis_id: price
-    color: "#4C1D95"
-    stroke_width: 1
-    stroke_dash: 15
-    extend_to: false
-    show:
-      legend_value: false
-    data_generator: >
-      const b = Number(entity?.attributes?.price_baseline); if
-      (!Number.isFinite(b)) return []; const now = Date.now(); return [[now - 24
-      * 60 * 60 * 1000, b], [now + 24 * 60 * 60 * 1000, b]];
-```
-
-Recommended interpretation:
-- `Requested duty ratio` is the effective continuous control request. This is the main
-  series to trust when you want to understand what Heat Pump Pilot actually asked for.
-- `Raw MPC first step` is only a diagnostic overlay. In continuous mode it can flip
-  even when the effective request stays stable.
-- `Anti-chatter limited` briefly rises when the controller suppresses a rapid reversal.
-- If you want a simpler chart, remove `Raw MPC first step` and `Anti-chatter limited`.
+Solid traces show observations; dashed traces show the latest plan/forecast.
+The baseline traces its historical values instead of projecting today's value
+back over yesterday. Requested heating is a request percentage, not measured
+compressor power. Activity lanes use separate hidden axes and do not expand the
+temperature scale. The simple details example replaces the old duplicate score,
+curve-recommendation and legacy warm-bias panels; detailed curve advice remains
+available on the Health sensor when needed.
 
 ## Screenshots
 <table>
   <tr>
     <td align="center">
-      <img src="screenshots/chart_example_1.png" alt="ApexCharts example" width="420">
+      <img src="screenshots/chart_example_1.png" alt="Pilot overview with forecast, prices and compact activity lanes" width="420">
     </td>
     <td align="center">
-      <img src="screenshots/sensor_1.png" alt="Diagnostics example" width="420">
+      <img src="screenshots/sensor_1.png" alt="Comfort, heating-price and prediction evidence" width="420">
     </td>
   </tr>
 </table>
 
 ## Tests
-Tests live under `tests/`:
-- `test_forecast_utils.py`
-- `test_learning_utils.py`
-- `test_mpc_controller.py`
-- `test_notification_utils.py`
-- `test_performance_utils.py`
-- `test_thermal_model.py`
-- `test_virtual_outdoor_utils.py`
 
-Run with:
+Tests cover adaptive learning, pump-response fitting and restart restoration,
+command smoothing, preheating/coasting, price forecasts, performance scores,
+sensor freshness and optional UFH control. Run the full suite with Python 3.12
+(the CI version) or later:
+
 ```bash
-pytest
+python -m pip install pytest voluptuous
+python -m pytest -q tests
 ```
-
-## Adding another learning model
-To add a new learning model:
-1. Implement a new estimator in `thermal_model.py` with `step()`,
-   `observe_temperature()`, `export_state()`, and `restore()`.
-2. Add a new `LEARNING_MODEL_*` constant and config option.
-3. Update `_build_thermal_model()` in `climate.py` to instantiate it.
-4. Ensure persistence includes a `model_type` field and add tests.
-5. Update the config flow and strings for the new option.
 
 ## Notes and limitations
 - In monitor-only mode without a reliable heat signal, learning is disabled.
 - Heating detection via supply/flow sensor improves learning quality and speed.
-- Weather forecast data is optional but improves prediction accuracy; the weather entity itself
-  is still required in the config flow.
+- A weather entity is required during setup. A usable forecast can improve planning;
+  if unavailable, Pilot falls back to current outdoor temperature.
 
 
-### Optional UFH circulation pump control
+## Optional UFH circulation pump control
 
 In **Configure → Advanced: UFH circulation pumps**, enable the feature, select
 its own heat-pump supply temperature sensor, and select one or more pump switches.

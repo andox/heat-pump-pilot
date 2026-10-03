@@ -1,0 +1,107 @@
+# Manual dashboard card; built-in HA cards only. Replace Pilot entity IDs if renamed.
+type: "vertical-stack"
+cards:
+  -
+    type: "thermostat"
+    entity: "climate.heat_pump_pilot"
+  -
+    type: "entities"
+    title: "Pilot status and scores"
+    show_header_toggle: false
+    entities:
+      - "sensor.heat_pump_pilot_control_state"
+      - "sensor.heat_pump_pilot_health"
+      - "sensor.heat_pump_pilot_comfort_score"
+      - "sensor.heat_pump_pilot_price_score"
+      - "sensor.heat_pump_pilot_prediction_accuracy"
+  -
+    type: "entities"
+    title: "Adaptive house learning"
+    show_header_toggle: false
+    entities:
+      -
+        type: "attribute"
+        entity: "climate.heat_pump_pilot"
+        attribute: "estimated_heat_loss_coefficient"
+        name: "Heat loss (1/h)"
+      -
+        type: "attribute"
+        entity: "climate.heat_pump_pilot"
+        attribute: "estimated_heat_gain_coefficient"
+        name: "Heating gain (°C/h at full heating)"
+      -
+        type: "attribute"
+        entity: "climate.heat_pump_pilot"
+        attribute: "estimated_background_gain"
+        name: "Background warmth (°C/h)"
+      - "sensor.heat_pump_pilot_learning_state"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_learning_state"
+        attribute: "fit_status"
+        name: "Fit status"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_learning_state"
+        attribute: "gain_identified"
+        name: "Heating gain identified"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_learning_state"
+        attribute: "interval_status"
+        name: "Latest interval"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_learning_state"
+        attribute: "coverage"
+        name: "Latest interval coverage (0–1)"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_learning_state"
+        attribute: "fit_mae_c_per_hour"
+        name: "Fit error (°C/h)"
+  -
+    type: "entities"
+    title: "Planning and measured heating"
+    show_header_toggle: false
+    entities:
+      - "sensor.heat_pump_pilot_decision"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_decision"
+        attribute: "planning_model"
+        name: "Delivery model"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_decision"
+        attribute: "planned_comfort_status"
+        name: "Predicted comfort band"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_decision"
+        attribute: "comfort_lower_bound"
+        name: "Lower bound (°C)"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_decision"
+        attribute: "comfort_upper_bound"
+        name: "Upper bound (°C)"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_decision"
+        attribute: "planned_comfort_violation_degree_hours"
+        name: "Predicted excursions (°C·h)"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_decision"
+        attribute: "effective_requested_duty_ratio"
+        name: "Applied request (0–1)"
+      -
+        type: "attribute"
+        entity: "sensor.heat_pump_pilot_decision"
+        attribute: "pump_response_planning_active"
+        name: "Learned pump response used"
+      - "binary_sensor.heat_pump_pilot_heating_detected"
+  -
+    type: "markdown"
+    content: "Heat loss multiplies the indoor/outdoor temperature difference. Heating gain describes detected heating; background is unexplained net warmth/cooling. Gain can stay frozen while other terms learn. Collecting pump-response samples does not mean the latest plan uses them. Scores need coverage; price score is a timing diagnostic, not measured savings. Prediction error evaluates prior plans, not a completed 24-hour forecast."
