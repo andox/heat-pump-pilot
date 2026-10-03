@@ -55,7 +55,13 @@ def harness():
     entity.bases, entity.decorator_list = [], []
     for method in entity.body:
         method.decorator_list = []
-    tree.body = [entity]
+    # Keep the source module's annotation semantics. Python 3.12 evaluates
+    # annotations eagerly without this import; Python 3.14 can mask its loss.
+    future_imports = [
+        node for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__"
+    ]
+    tree.body = [*future_imports, entity]
     namespace = dict(
         vars(const),
         virtual_request=virtual_request,
@@ -106,6 +112,14 @@ def harness():
     instance._virtual_outdoor_smoothing_alpha = 0.5
     instance._virtual_outdoor_smoothing_enabled = True
     return instance, readings, states
+
+
+def test_harness_preserves_postponed_source_annotations():
+    entity, _, _ = harness()
+    # Inspecting these on 3.14 must not evaluate stripped-import names either.
+    annotations = entity._summer_heat_window_settings_changed.__annotations__
+    assert annotations["previous_options"] == "dict[str, Any]"
+    assert annotations["return"] == "bool"
 
 
 @pytest.mark.parametrize(
