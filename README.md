@@ -404,7 +404,10 @@ actually been observed without pretending the whole window is covered.
 
 MPC prices below baseline retain their price ratio. Above baseline, set
 `x = min(ratio, 3) - 1`; the shaped value is `1 + x` (linear), `1 + sqrt(x)`
-or `1 + x²` (quadratic). The curves shape only the excess above baseline;
+or `1 + x²` (quadratic). Above ratio 3, add `ratio - 3` to continue
+linearly: the limit bounds nonlinear amplification without making expensive
+hours cost the same. For the default linear curve, the result is simply the
+price ratio, including above 3. The curves shape only the excess above baseline;
 `sqrt` is stronger than linear for excesses below one and gentler above one,
 while quadratic does the reverse. Price weight multiplies this term, after
 predicted comfort-band violations have been ranked. The planning cost is not a

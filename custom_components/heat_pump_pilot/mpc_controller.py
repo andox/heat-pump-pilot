@@ -218,7 +218,11 @@ class MpcController:
         return int(math.ceil(scaled - 0.5))
 
     def _apply_price_penalty_curve(self, ratio: float) -> float:
-        """Apply the configured price curve above the baseline ratio."""
+        """Shape excess prices, continuing linearly above the shaping limit.
+
+        The limit bounds nonlinear amplification, never price discrimination.
+        A low historical baseline must not make an expensive forecast flat.
+        """
         if ratio <= 1.0:
             return ratio
         capped_ratio = min(ratio, self.price_ratio_cap)
@@ -229,7 +233,7 @@ class MpcController:
             adjusted = x * x
         else:
             adjusted = x
-        return 1.0 + adjusted
+        return 1.0 + adjusted + max(0.0, ratio - self.price_ratio_cap)
 
     def _optimize(
         self,

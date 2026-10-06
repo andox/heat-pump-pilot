@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 from statistics import fmean, median
 
@@ -337,8 +339,8 @@ def test_price_penalty_curve_no_effect_at_or_below_baseline() -> None:
     assert linear_result.sequence == sqrt_result.sequence == quadratic_result.sequence
 
 
-def test_price_penalty_curve_cap_limits_extreme_ratios() -> None:
-    """Playback scenario: extreme ratios are capped before applying the curve."""
+def test_price_penalty_curve_limits_amplification_without_flattening_prices() -> None:
+    """Nonlinear shaping is bounded, but expensive hours retain their order."""
     price_forecast = _load_sample_series("price_forecast")
     outdoor_forecast = _load_sample_series("outdoor_forecast")
     assert price_forecast
@@ -363,8 +365,22 @@ def test_price_penalty_curve_cap_limits_extreme_ratios() -> None:
     _, result = controller.suggest_control(19.0, outdoor_forecast, price_forecast)
     assert result is not None
 
-    capped_penalty = controller._apply_price_penalty_curve(10.0)
-    assert capped_penalty == 2.0
+    assert controller._apply_price_penalty_curve(2.0) == 2.0
+    assert controller._apply_price_penalty_curve(10.0) == 10.0
+    assert controller._apply_price_penalty_curve(11.0) == 11.0
+
+
+@pytest.mark.parametrize("curve", ["linear", "sqrt", "quadratic"])
+@pytest.mark.parametrize("limit", [1.0, 2.0, 3.0])
+def test_price_penalty_is_continuous_and_increases_above_shaping_limit(curve, limit):
+    controller = MpcController(20, 0.8, 1, 12,
+                               price_penalty_curve=curve, price_ratio_cap=limit)
+    shape = controller._apply_price_penalty_curve
+    assert shape(limit + 1e-8) == pytest.approx(shape(limit), abs=1e-7)
+    assert shape(limit + 1) > shape(limit)
+    assert shape(limit + 10) - shape(limit + 1) == pytest.approx(9)
+    assert shape(0.5) == 0.5
+    assert shape(1) == 1
 
 
 def test_price_comfort_weight_shifts_heating_with_curve() -> None:

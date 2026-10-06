@@ -67,6 +67,39 @@ def test_price_peak_timing_changes_when_heat_is_stored():
     assert sum(early_cheap.predicted_heating[16:32]) < sum(late_cheap.predicted_heating[16:32])
 
 
+@pytest.mark.parametrize("continuous", [False, True])
+@pytest.mark.parametrize("curve", ["linear", "sqrt", "quadratic"])
+def test_low_history_baseline_still_preheats_before_an_expensive_peak(continuous, curve):
+    # Recent near-zero history can keep the median well below EVERY future
+    # price. A price cap formerly erased this entire forecast's price signal.
+    c = controller(heat_gain_coeff=0.6, price_penalty_curve=curve)
+    prices = [1.3]*16 + [2.08]*16 + [1.1]*16
+    baseline = 0.269
+    assert min(prices) > 3*baseline
+    context = (ResponseParameters(), (0, ()),
+               VirtualActuator(10, -15, 1, 20, initial_duty=0,
+                               learned_response=False)) if continuous else None
+    _, result = c.suggest_control(20.5, [10]*48, prices,
+        price_baseline_override=baseline, response_context=context)
+    heat = result.predicted_heating if continuous else result.sequence
+    assert result.comfort_status == "within_band"
+    assert min(result.predicted_temperatures) >= 19.3 - 1e-8
+    assert max(result.predicted_temperatures) <= 21.7 + 1e-8
+    assert result.predicted_temperatures[16] > 20.5
+    # Binary planning may need one whole 15-minute slot to maintain the floor.
+    assert sum(heat[16:32])*0.25 <= 0.25
+    assert sum(heat[:16])*0.25 > 2
+    # Cost uses actual forecast prices, independently of the shaped objective.
+    # Compare against the former flat-price plan under the same comfort band.
+    shape = c._apply_price_penalty_curve
+    c._apply_price_penalty_curve = lambda ratio: shape(min(ratio, c.price_ratio_cap))
+    _, flat_plan = c.suggest_control(20.5, [10]*48, prices,
+        price_baseline_override=baseline, response_context=context)
+    flat_heat = flat_plan.predicted_heating if continuous else flat_plan.sequence
+    assert sum(h*p for h,p in zip(heat, prices)) < 0.9*sum(
+        h*p for h,p in zip(flat_heat, prices))
+
+
 @pytest.mark.parametrize("weight", [0, 0.5, 0.8, 1])
 def test_even_extreme_prices_cannot_buy_avoidable_cold(weight):
     c = controller(weight)
